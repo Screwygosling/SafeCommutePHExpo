@@ -1,55 +1,45 @@
 import React, {useState, useEffect} from 'react';
 import {View, Text, TouchableOpacity, Switch, StyleSheet, SafeAreaView, ScrollView, ActivityIndicator} from 'react-native';
-import {getRouteOptions} from '../utils/api';
+import {computeRoutes} from '../utils/RouteEngine';
 
 const ACCENT = '#2D6A4F', DANGER = '#D62828', WARN = '#EF8C2D';
 
-const FALLBACK_ROUTES = [
-  {id:'safest',   label:'Safest Route',   score:90, duration:'28 min', distance:'6.2 km', desc:'Avoids all high-risk zones.',      scoreColor:ACCENT, tagBg:'#EBF5F0', tagColor:ACCENT, tag:'✅ Recommended'},
-  {id:'balanced', label:'Balanced Route', score:72, duration:'21 min', distance:'4.9 km', desc:'Moderate risk, slightly faster.',  scoreColor:WARN,   tagBg:'#FFF4E6', tagColor:WARN,   tag:'⚖️ Balanced'},
-  {id:'fastest',  label:'Fastest Route',  score:55, duration:'15 min', distance:'4.1 km', desc:'Passes high-risk areas. Caution.',scoreColor:DANGER, tagBg:'#FDEAEA', tagColor:DANGER, tag:'⚡ Fastest'},
-];
+const DEFAULT_ORIGIN = [14.5378, 121.0014];
+const DEFAULT_DEST   = [14.5547, 121.0244];
 
-function scoreColor(score) {
-  if (score >= 80) return ACCENT;
-  if (score >= 60) return WARN;
-  return DANGER;
-}
-
-function tagStyle(score) {
-  if (score >= 80) return {bg: '#EBF5F0', color: ACCENT};
-  if (score >= 60) return {bg: '#FFF4E6', color: WARN};
-  return {bg: '#FDEAEA', color: DANGER};
-}
+const isValidCoord = (c) =>
+  Array.isArray(c) && c.length >= 2 &&
+  typeof c[0] === 'number' && typeof c[1] === 'number';
 
 export default function RouteOptionsScreen({navigation, route}) {
-  const {origin = 'Current Location', destination = 'My Destination'} = route?.params || {};
-  const [selected, setSelected]   = useState('safest');
-  const [filters, setFilters]     = useState({safest: true, police: true, transit: true});
-  const [routes, setRoutes]       = useState(FALLBACK_ROUTES);
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState(null);
+  const {
+    origin       = 'Current Location',
+    destination  = 'My Destination',
+    originCoords = null,
+    destCoords   = null,
+  } = route?.params || {};
 
-  useEffect(() => {
-    fetchRoutes();
-  }, []);
+  const safeOrigin = isValidCoord(originCoords) ? originCoords : DEFAULT_ORIGIN;
+  const safeDest   = isValidCoord(destCoords)   ? destCoords   : DEFAULT_DEST;
+
+  const [selected, setSelected] = useState('safest');
+  const [filters, setFilters]   = useState({safest: true, police: true, transit: true});
+  const [routes, setRoutes]     = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
+
+  useEffect(() => { fetchRoutes(); }, []);
 
   const fetchRoutes = async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await getRouteOptions(origin, destination);
-      // Attach colors based on dynamic score
-      const enriched = data.routes.map(r => ({
-        ...r,
-        scoreColor: scoreColor(r.score),
-        tagBg:      tagStyle(r.score).bg,
-        tagColor:   tagStyle(r.score).color,
-      }));
-      setRoutes(enriched);
+      const data = await computeRoutes(safeOrigin, safeDest);
+      setRoutes(data);
+      setSelected(data[0]?.id ?? 'safest');
     } catch (e) {
-      setError('Could not load live route data. Showing estimates.');
-      console.error(e);
+      setError('Could not reach routing server. Check your connection.');
+      console.error('[RouteOptions]', e);
     } finally {
       setLoading(false);
     }
@@ -87,12 +77,21 @@ export default function RouteOptionsScreen({navigation, route}) {
 
         {/* Filters */}
         <View style={s.card}>
-          {[{k:'safest',label:'Safest Route',icon:'🛡️'},{k:'police',label:'Police Stations',icon:'🚔'},{k:'transit',label:'Transit Routes',icon:'🚌'}].map(f => (
+          {[
+            {k:'safest',  label:'Safest Route',    icon:'🛡️'},
+            {k:'police',  label:'Police Stations',  icon:'🚔'},
+            {k:'transit', label:'Transit Routes',   icon:'🚌'},
+          ].map(f => (
             <View key={f.k} style={s.filterRow}>
               <Text style={s.filterIcon}>{f.icon}</Text>
               <Text style={s.filterLabel}>{f.label}</Text>
-              <Switch value={filters[f.k]} onValueChange={() => setFilters(p => ({...p, [f.k]: !p[f.k]}))}
-                trackColor={{false: '#E0E0E0', true: ACCENT}} thumbColor="#FFF" ios_backgroundColor="#E0E0E0"/>
+              <Switch
+                value={filters[f.k]}
+                onValueChange={() => setFilters(p => ({...p, [f.k]: !p[f.k]}))}
+                trackColor={{false: '#E0E0E0', true: ACCENT}}
+                thumbColor="#FFF"
+                ios_backgroundColor="#E0E0E0"
+              />
             </View>
           ))}
         </View>
@@ -106,7 +105,12 @@ export default function RouteOptionsScreen({navigation, route}) {
           </View>
         ) : (
           routes.map(r => (
-            <TouchableOpacity key={r.id} style={[s.routeCard, selected === r.id && s.routeCardSel]} onPress={() => setSelected(r.id)} activeOpacity={0.85}>
+            <TouchableOpacity
+              key={r.id}
+              style={[s.routeCard, selected === r.id && s.routeCardSel]}
+              onPress={() => setSelected(r.id)}
+              activeOpacity={0.85}
+            >
               <View style={s.routeTop}>
                 <View style={{flex: 1, marginRight: 12}}>
                   <Text style={s.routeLabel}>{r.label}</Text>
@@ -120,23 +124,44 @@ export default function RouteOptionsScreen({navigation, route}) {
                   <Text style={s.scoreLbl}>Safety</Text>
                 </View>
               </View>
+
               <View style={s.barWrap}>
-                <View style={s.barBg}><View style={[s.barFill, {width: `${r.score}%`, backgroundColor: r.scoreColor}]}/></View>
+                <View style={s.barBg}>
+                  <View style={[s.barFill, {width: `${r.score}%`, backgroundColor: r.scoreColor}]}/>
+                </View>
                 <Text style={[s.barNum, {color: r.scoreColor}]}>{r.score}</Text>
               </View>
+
               <View style={s.metaRow}>
                 <Text style={s.meta}>⏱ {r.duration}</Text>
                 <Text style={s.meta}>📏 {r.distance}</Text>
               </View>
-              {selected === r.id && <View style={s.selBadge}><Text style={s.selBadgeText}>✓ Selected</Text></View>}
+
+              {selected === r.id && (
+                <View style={s.selBadge}>
+                  <Text style={s.selBadgeText}>✓ Selected</Text>
+                </View>
+              )}
             </TouchableOpacity>
           ))
         )}
 
         <TouchableOpacity
-          style={s.startBtn}
-          onPress={() => navigation.navigate('Navigation', {routeType: sel?.label, safetyScore: sel?.score, origin, destination})}
-          activeOpacity={0.87}>
+          style={[s.startBtn, (!sel || loading) && {opacity: 0.5}]}
+          disabled={!sel || loading}
+          onPress={() => navigation.navigate('Navigation', {
+            routeType:    sel?.label,
+            safetyScore:  sel?.score,
+            origin,
+            destination,
+            originCoords: safeOrigin,
+            destCoords:   safeDest,
+            // Pass the decoded polyline so NavigationScreen can draw it exactly
+            routePolyline: sel?.polyline ?? [],
+            routeSteps:    sel?.steps    ?? [],
+          })}
+          activeOpacity={0.87}
+        >
           <Text style={s.startBtnText}>🧭 Start Navigation</Text>
           <Text style={s.startBtnSub}>{sel?.label} • Safety Score: {sel?.score}</Text>
         </TouchableOpacity>

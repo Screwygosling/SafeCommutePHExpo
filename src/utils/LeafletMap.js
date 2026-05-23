@@ -29,35 +29,24 @@ export const POLICE_STATIONS = [
   {name: 'Paranaque Police',       lat: 14.4673, lng: 121.0146},
 ];
 
-// Maps OSRM turn type + modifier to an emoji icon
-function osrmIcon(type, modifier) {
-  if (type === 'arrive')   return '🏁';
-  if (type === 'depart')   return '🚦';
-  if (type === 'roundabout' || type === 'rotary') return '🔄';
-  if (!modifier)           return '⬆️';
-  if (modifier.includes('left'))  return modifier.includes('sharp') ? '↰' : '↱';
-  if (modifier.includes('right')) return modifier.includes('sharp') ? '↱' : '↰';
-  if (modifier === 'uturn') return '↩️';
-  return '⬆️';
-}
-
 export function buildLeafletHTML({
-  center = MANILA_CENTER,
-  zoom = 13,
-  showHeatmap = true,
-  showPolice = false,
-  showRoute = false,
-  routeCoords = [], // [[startLat, startLng], [endLat, endLng]]
+  center        = MANILA_CENTER,
+  zoom          = 13,
+  showHeatmap   = true,
+  showPolice    = false,
+  showRoute     = false,
+  routeCoords   = [],     // [[lat,lng], [lat,lng]] — only used as fallback
+  routePolyline = [],     // [[lat,lng], ...] full decoded polyline from routeEngine
   heatmapPoints = [],
 }) {
   const resolvedHeatmap = heatmapPoints.length > 0
     ? heatmapPoints.map(p => [p.lat, p.lng, p.intensity * 100])
     : HOTSPOT_DATA;
 
-  // Serialise all data once here so the template stays clean
   const heatmapJSON  = JSON.stringify(resolvedHeatmap);
   const policeJSON   = JSON.stringify(POLICE_STATIONS);
-  const routeJSON    = JSON.stringify(routeCoords);
+  const polylineJSON = JSON.stringify(routePolyline);   // pre-computed full path
+  const endpointsJSON = JSON.stringify(routeCoords);    // just start+end for fallback
 
   return `<!DOCTYPE html>
 <html>
@@ -67,25 +56,17 @@ export function buildLeafletHTML({
 
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
-
   <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"><\/script>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css"/>
-  <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"><\/script>
-
-  <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css"/>
-  <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"><\/script>
 
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     html,body,#map{width:100%;height:100%}
     .leaflet-control-zoom,.leaflet-control-attribution{display:none}
-    .leaflet-routing-container{display:none!important}
   </style>
 </head>
 <body>
 <div id="map"></div>
 <script>
-  // ── helpers ──────────────────────────────────────────────────────────────
   function postRN(obj) {
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify(obj));
@@ -93,13 +74,13 @@ export function buildLeafletHTML({
   }
 
   function osrmIcon(type, modifier) {
-    if (type === 'arrive')                            return '🏁';
-    if (type === 'depart')                            return '🚦';
-    if (type === 'roundabout' || type === 'rotary')   return '🔄';
-    if (!modifier)                                    return '⬆️';
+    if (type === 'arrive')                          return '🏁';
+    if (type === 'depart')                          return '🚦';
+    if (type === 'roundabout' || type === 'rotary') return '🔄';
+    if (!modifier)                                  return '⬆️';
     if (modifier.indexOf('left')  !== -1) return modifier.indexOf('sharp') !== -1 ? '↰' : '↱';
     if (modifier.indexOf('right') !== -1) return modifier.indexOf('sharp') !== -1 ? '↱' : '↰';
-    if (modifier === 'uturn')                         return '↩️';
+    if (modifier === 'uturn')                       return '↩️';
     return '⬆️';
   }
 
@@ -109,18 +90,26 @@ export function buildLeafletHTML({
       : Math.round(metres) + ' m';
   }
 
-  // ── data ─────────────────────────────────────────────────────────────────
-  var hotspotsData = ${heatmapJSON};
-  var policeData   = ${policeJSON};
-  var routePoints  = ${routeJSON};
+  function markerIcon(color) {
+    return L.divIcon({
+      html: '<div style="width:14px;height:14px;border-radius:50%;background:' + color + ';border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>',
+      className: '', iconSize: [14, 14], iconAnchor: [7, 7],
+    });
+  }
 
-  // ── map ──────────────────────────────────────────────────────────────────
+  // ── data injected from React Native ──────────────────────────────────────
+  var hotspotsData  = ${heatmapJSON};
+  var policeData    = ${policeJSON};
+  var precomputedPolyline = ${polylineJSON};  // full route from routeEngine
+  var endpoints     = ${endpointsJSON};        // [[startLat,startLng],[endLat,endLng]]
+
+  // ── map ───────────────────────────────────────────────────────────────────
   var map = L.map('map', {zoomControl: false, attributionControl: false})
     .setView([${center.lat}, ${center.lng}], ${zoom});
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19}).addTo(map);
 
-  // ── heatmap ──────────────────────────────────────────────────────────────
+  // ── heatmap ───────────────────────────────────────────────────────────────
   if (${showHeatmap}) {
     L.heatLayer(hotspotsData, {
       radius: 40, blur: 25, maxZoom: 17,
@@ -128,73 +117,86 @@ export function buildLeafletHTML({
     }).addTo(map);
   }
 
-  // ── police markers ───────────────────────────────────────────────────────
+  // ── police markers ────────────────────────────────────────────────────────
   if (${showPolice}) {
-    var policeIcon = L.divIcon({
-      html: '<div style="font-size:24px;line-height:1">🚔</div>',
-      className: '', iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -15],
-    });
     policeData.forEach(function(s) {
-      L.marker([s.lat, s.lng], {icon: policeIcon})
-        .bindPopup('<b>' + s.name + '</b><br>Police Station — 24/7')
-        .addTo(map);
+      L.marker([s.lat, s.lng], {
+        icon: L.divIcon({html: '<div style="font-size:24px;line-height:1">🚔</div>', className:'', iconSize:[30,30], iconAnchor:[15,15]}),
+      }).bindPopup('<b>' + s.name + '</b><br>Police Station — 24/7').addTo(map);
     });
   }
 
-  // ── OSRM routing ─────────────────────────────────────────────────────────
-  if (${showRoute} && routePoints.length >= 2) {
-    // FIX: store the control in a variable so event handlers can reference it
-    var routingControl = L.Routing.control({
-      waypoints: [
-        L.latLng(routePoints[0][0], routePoints[0][1]),
-        L.latLng(routePoints[1][0], routePoints[1][1]),
-      ],
-      router: L.Routing.osrmv1({
-        serviceUrl: 'https://router.project-osrm.org/route/v1',
-      }),
-      lineOptions: {
-        styles: [{color: '#2D6A4F', weight: 6, opacity: 0.9}],
-      },
-      createMarker: function(i, wp) {
-        var color = (i === 0) ? '#1565C0' : '#D62828';
-        var label = (i === 0) ? 'Start' : 'Destination';
-        return L.circleMarker(wp.latLng, {
-          radius: 10, color: color, fillColor: color, fillOpacity: 1,
-        }).bindPopup(label);
-      },
-      addWaypoints: false,
-      routeWhileDragging: false,
-    }).addTo(map);
+  // ── route drawing ─────────────────────────────────────────────────────────
+  if (${showRoute}) {
 
-    // FIX: 'routesfound' (not 'routingfound') is the correct LRM event name
-    routingControl.on('routesfound', function(e) {
-      var route = e.routes[0];
-      // Map every OSRM step to the shape NavigationScreen expects
-      var steps = route.instructions.map(function(instr) {
-        return {
-          instruction: instr.text,
-          distance: fmtDist(instr.distance),
-          icon: osrmIcon(instr.type, instr.modifier),
-        };
-      });
-      postRN({type: 'ROUTE_FOUND', steps: steps});
-    });
+    // PATH 1 — use the pre-computed polyline from routeEngine (the chosen route)
+    if (precomputedPolyline && precomputedPolyline.length > 1) {
+      // Draw the polyline directly — no OSRM call needed
+      var routeLine = L.polyline(precomputedPolyline, {
+        color: '#2D6A4F', weight: 6, opacity: 0.9,
+      }).addTo(map);
 
-    // FIX: was 'routingerror' — correct LRM event is 'routingerror' but the
-    //      handler referenced undefined 'control'; now uses 'routingControl'
-    routingControl.on('routingerror', function(e) {
-      postRN({
-        type: 'ERROR',
-        message: 'Routing failed. The OSRM demo server might be busy.',
-      });
-    });
+      // Fit map to the route bounds
+      map.fitBounds(routeLine.getBounds(), {padding: [40, 40]});
+
+      // Place start / end markers
+      var start = precomputedPolyline[0];
+      var end   = precomputedPolyline[precomputedPolyline.length - 1];
+      L.marker(start, {icon: markerIcon('#1565C0')}).bindPopup('Start').addTo(map);
+      L.marker(end,   {icon: markerIcon('#D62828')}).bindPopup('Destination').addTo(map);
+
+      // Signal ready — steps come from NavigationScreen params, not the map
+      postRN({type: 'MAP_READY'});
+
+    // PATH 2 — no polyline passed, fall back to a fresh OSRM call
+    } else if (endpoints && endpoints.length >= 2) {
+      var origin = endpoints[0];
+      var dest   = endpoints[endpoints.length - 1];
+      var coordStr = origin[1] + ',' + origin[0] + ';' + dest[1] + ',' + dest[0];
+      var osrmUrl  = 'https://router.project-osrm.org/route/v1/driving/' + coordStr
+        + '?overview=full&geometries=geojson&steps=true';
+
+      fetch(osrmUrl)
+        .then(function(r) { return r.json(); })
+        .then(function(json) {
+          if (json.code !== 'Ok' || !json.routes.length) throw new Error('No route');
+          var route = json.routes[0];
+
+          // Draw GeoJSON route line
+          var line = L.geoJSON(route.geometry, {
+            style: {color: '#2D6A4F', weight: 6, opacity: 0.9},
+          }).addTo(map);
+          map.fitBounds(line.getBounds(), {padding: [40, 40]});
+
+          L.marker(origin, {icon: markerIcon('#1565C0')}).bindPopup('Start').addTo(map);
+          L.marker(dest,   {icon: markerIcon('#D62828')}).bindPopup('Destination').addTo(map);
+
+          // Build steps for NavigationScreen
+          var allSteps = [];
+          route.legs.forEach(function(leg) {
+            leg.steps.forEach(function(step) {
+              var maneuver = step.maneuver || {};
+              allSteps.push({
+                instruction: step.name || maneuver.type || 'Continue',
+                distance:    fmtDist(step.distance),
+                icon:        osrmIcon(maneuver.type, maneuver.modifier),
+              });
+            });
+          });
+
+          postRN({type: 'MAP_READY'});
+          postRN({type: 'ROUTE_FOUND', steps: allSteps});
+        })
+        .catch(function(err) {
+          postRN({type: 'ERROR', message: 'Routing failed: ' + err.message});
+          postRN({type: 'MAP_READY'});
+        });
+    }
+
+  } else {
+    // No route — just signal ready
+    map.whenReady(function() { postRN({type: 'MAP_READY'}); });
   }
-
-  // ── ready signal ─────────────────────────────────────────────────────────
-  // FIX: was posting a bare string; handleMessage does JSON.parse so must be JSON
-  map.whenReady(function() {
-    postRN({type: 'MAP_READY'});
-  });
 <\/script>
 </body>
 </html>`;
