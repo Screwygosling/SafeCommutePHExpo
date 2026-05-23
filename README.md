@@ -155,7 +155,9 @@ Example:
 ## Contributors
 
 * Reuther Felias
-* Thesis Team Members
+* Jerome Comapon
+* Joshua Montifar
+* Jon Ryan Salvamante
 
 ---
 
