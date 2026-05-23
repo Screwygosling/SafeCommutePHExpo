@@ -1,99 +1,110 @@
 import React, {useState, useEffect, useRef} from 'react';
 import {View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Animated, Alert, Share, ActivityIndicator} from 'react-native';
 import {WebView} from 'react-native-webview';
-import {buildLeafletHTML, SAFE_ROUTE} from '../utils/LeafletMap';
+import {buildLeafletHTML} from '../utils/LeafletMap';
 
 const ACCENT = '#2D6A4F';
 const DANGER = '#D62828';
 
-export default function NavigationScreen({navigation, route}) {
-  const {
-    routeType    = 'Safest Route',
-    safetyScore  = 90,
-    origin       = 'Current Location',
-    destination  = 'Destination',
-    originCoords = SAFE_ROUTE[0],
-    destCoords   = SAFE_ROUTE[SAFE_ROUTE.length - 1],
-  } = route?.params || {};
+const DEFAULT_ORIGIN = [14.5378, 121.0014];
+const DEFAULT_DEST   = [14.5547, 121.0244];
 
-  const [steps, setSteps]     = useState([{instruction: 'Calculating route…', distance: '', icon: '🛰️'}]);
-  const [step, setStep]       = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [alert, setAlert]     = useState(false);
-  const [mapReady, setMapReady] = useState(false);
+const isValidCoord = (c) =>
+  Array.isArray(c) && c.length >= 2 &&
+  typeof c[0] === 'number' && typeof c[1] === 'number';
+
+export default function NavigationScreen({navigation, route}) {
+  const params = route?.params || {};
+
+  const routeType      = params.routeType      ?? 'Safest Route';
+  const safetyScore    = params.safetyScore    ?? 90;
+  const origin         = params.origin         ?? 'Current Location';
+  const destination    = params.destination    ?? 'Destination';
+  const originCoords   = isValidCoord(params.originCoords)   ? params.originCoords   : DEFAULT_ORIGIN;
+  const destCoords     = isValidCoord(params.destCoords)     ? params.destCoords     : DEFAULT_DEST;
+  // The chosen route's full polyline — draw this directly, no second OSRM call
+  const routePolyline  = Array.isArray(params.routePolyline) && params.routePolyline.length > 1
+    ? params.routePolyline
+    : [];
+
+  const [steps, setSteps]         = useState([{instruction: 'Calculating route…', distance: '', icon: '🛰️'}]);
+  const [step, setStep]           = useState(0);
+  const [elapsed, setElapsed]     = useState(0);
+  const [showAlert, setShowAlert] = useState(false);
+  const [mapReady, setMapReady]   = useState(false);
   const alertAnim = useRef(new Animated.Value(0)).current;
 
+  // Build steps from the pre-computed OSRM raw steps if available
+  useEffect(() => {
+    const rawSteps = params.routeSteps;
+    if (Array.isArray(rawSteps) && rawSteps.length > 0) {
+      const mapped = rawSteps.map(s => {
+        const maneuver = s.maneuver || {};
+        return {
+          instruction: s.name || maneuver.type || 'Continue',
+          distance:    s.distance >= 1000
+            ? (s.distance / 1000).toFixed(1) + ' km'
+            : Math.round(s.distance) + ' m',
+          icon: osrmStepIcon(maneuver.type, maneuver.modifier),
+        };
+      }).filter(s => s.instruction && s.instruction !== '');
+      if (mapped.length > 0) setSteps(mapped);
+    }
+  }, []);
+
   const mapHTML = buildLeafletHTML({
-    center: {lat: originCoords[0], lng: originCoords[1]},
-    zoom: 14,
-    showHeatmap: true,
-    showPolice: false,
-    showRoute: true,
-    routeCoords: [originCoords, destCoords],
+    center:         {lat: originCoords[0], lng: originCoords[1]},
+    zoom:           14,
+    showHeatmap:    true,
+    showPolice:     false,
+    showRoute:      true,
+    routeCoords:    [originCoords, destCoords],  // fallback endpoints
+    routePolyline:  routePolyline,               // the actual chosen route
   });
 
-  // Wire up real OSRM turn-by-turn steps from the WebView
   const handleMessage = (event) => {
     try {
-      const data = JSON.parse(event.nativeEvent.data);
-
-      if (data.type === 'MAP_READY') {
-        setMapReady(true);
-      }
-
+      const raw = event?.nativeEvent?.data;
+      if (!raw || typeof raw !== 'string') return;
+      const data = JSON.parse(raw);
+      if (data.type === 'MAP_READY')  setMapReady(true);
       if (data.type === 'ROUTE_FOUND' && Array.isArray(data.steps) && data.steps.length > 0) {
         setSteps(data.steps);
         setStep(0);
       }
-    } catch (_) {
-      // Non-JSON postMessage from Leaflet internals — ignore
-    }
+      if (data.type === 'ERROR') console.warn('[Map error]', data.message);
+    } catch (_) {}
   };
 
   useEffect(() => {
     const t1 = setInterval(() => setElapsed(e => e + 1), 1000);
-
-    // Show the caution alert after 5 s
     const t2 = setTimeout(() => {
-      setAlert(true);
+      setShowAlert(true);
       Animated.timing(alertAnim, {toValue: 1, duration: 300, useNativeDriver: true}).start();
     }, 5000);
-
-    // Auto-advance steps every 8 s (fallback when OSRM steps aren't available)
-    const t3 = setInterval(() => setStep(p => (p < steps.length - 1 ? p + 1 : p)), 8000);
-
-    return () => {
-      clearInterval(t1);
-      clearTimeout(t2);
-      clearInterval(t3);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    const t3 = setInterval(() => setStep(p => p < steps.length - 1 ? p + 1 : p), 8000);
+    return () => { clearInterval(t1); clearTimeout(t2); clearInterval(t3); };
   }, [steps.length]);
 
   const dismissAlert = () =>
-    Animated.timing(alertAnim, {toValue: 0, duration: 200, useNativeDriver: true}).start(() =>
-      setAlert(false),
-    );
+    Animated.timing(alertAnim, {toValue: 0, duration: 200, useNativeDriver: true})
+      .start(() => setShowAlert(false));
 
-  const fmt = s => `${Math.floor(s / 60)}:${s % 60 < 10 ? '0' : ''}${s % 60}`;
+  const fmt        = s => `${Math.floor(s / 60)}:${s % 60 < 10 ? '0' : ''}${s % 60}`;
   const scoreColor = safetyScore >= 80 ? ACCENT : safetyScore >= 60 ? '#EF8C2D' : DANGER;
-  const progress = ((step + 1) / steps.length) * 100;
-  const cur = steps[step] ?? steps[0];
+  const progress   = ((step + 1) / steps.length) * 100;
+  const cur        = steps[step] ?? steps[0];
 
   return (
     <SafeAreaView style={s.container}>
-      {/* Header */}
       <View style={s.header}>
         <TouchableOpacity style={s.back} onPress={() => navigation.goBack()}>
           <Text style={s.backArrow}>←</Text>
         </TouchableOpacity>
-        <Text style={s.headerTitle}>Navigation</Text>
-        <View style={s.timer}>
-          <Text style={s.timerText}>{fmt(elapsed)}</Text>
-        </View>
+        <Text style={s.headerTitle}>{routeType}</Text>
+        <View style={s.timer}><Text style={s.timerText}>{fmt(elapsed)}</Text></View>
       </View>
 
-      {/* Safety score bar */}
       <View style={s.scoreBar}>
         <Text style={s.scoreLabel}>Safety Score:</Text>
         <Text style={[s.scoreVal, {color: scoreColor}]}>{safetyScore}</Text>
@@ -102,19 +113,17 @@ export default function NavigationScreen({navigation, route}) {
         </View>
       </View>
 
-      {/* Current step banner */}
       <View style={s.stepBanner}>
         <Text style={s.stepIcon}>{cur.icon ?? '⬆️'}</Text>
         <View style={{flex: 1}}>
           <Text style={s.stepInstr}>{cur.instruction}</Text>
-          {cur.distance ? <Text style={s.stepDist}>In {cur.distance}</Text> : null}
+          {!!cur.distance && <Text style={s.stepDist}>In {cur.distance}</Text>}
         </View>
         <View style={s.stepCount}>
           <Text style={s.stepCountText}>{step + 1}/{steps.length}</Text>
         </View>
       </View>
 
-      {/* Map */}
       <View style={s.mapWrap}>
         {!mapReady && (
           <View style={s.loader}>
@@ -122,7 +131,6 @@ export default function NavigationScreen({navigation, route}) {
             <Text style={s.loaderText}>Loading route…</Text>
           </View>
         )}
-
         <WebView
           originWhitelist={['*']}
           source={{html: mapHTML}}
@@ -130,29 +138,17 @@ export default function NavigationScreen({navigation, route}) {
           javaScriptEnabled
           domStorageEnabled
           onLoad={() => setMapReady(true)}
-          onMessage={handleMessage}   // ← fixed: was an inline no-op
+          onMessage={handleMessage}
           scalesPageToFit={false}
           scrollEnabled={false}
           bounces={false}
         />
 
-        {alert && (
-          <Animated.View
-            style={[
-              s.alertBox,
-              {
-                opacity: alertAnim,
-                transform: [
-                  {
-                    translateY: alertAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [20, 0],
-                    }),
-                  },
-                ],
-              },
-            ]}
-          >
+        {showAlert && (
+          <Animated.View style={[s.alertBox, {
+            opacity: alertAnim,
+            transform: [{translateY: alertAnim.interpolate({inputRange:[0,1], outputRange:[20,0]})}],
+          }]}>
             <Text style={s.alertIcon}>⚠️</Text>
             <View style={{flex: 1}}>
               <Text style={s.alertTitle}>Alert: Caution</Text>
@@ -165,7 +161,6 @@ export default function NavigationScreen({navigation, route}) {
         )}
       </View>
 
-      {/* Progress bar */}
       <View style={s.prog}>
         <View style={s.progBg}>
           <View style={[s.progFill, {width: `${progress}%`}]} />
@@ -173,26 +168,16 @@ export default function NavigationScreen({navigation, route}) {
         <Text style={s.progLabel}>{Math.round(progress)}% complete</Text>
       </View>
 
-      {/* Action buttons */}
       <View style={s.actions}>
-        <TouchableOpacity
-          style={s.shareBtn}
-          onPress={() => Share.share({message: `Navigating to ${destination} via SafeCommute PH 📍`})}
-          activeOpacity={0.85}
-        >
+        <TouchableOpacity style={s.shareBtn} activeOpacity={0.85}
+          onPress={() => Share.share({message: `Navigating to ${destination} via SafeCommute PH 📍`})}>
           <Text style={s.shareBtnText}>📤 Share Location</Text>
         </TouchableOpacity>
-
-        <TouchableOpacity
-          style={s.endBtn}
-          onPress={() =>
-            Alert.alert('End Trip', 'End this trip?', [
-              {text: 'Cancel', style: 'cancel'},
-              {text: 'End Trip', style: 'destructive', onPress: () => navigation.navigate('MainTabs')},
-            ])
-          }
-          activeOpacity={0.85}
-        >
+        <TouchableOpacity style={s.endBtn} activeOpacity={0.85}
+          onPress={() => Alert.alert('End Trip', 'End this trip?', [
+            {text: 'Cancel', style: 'cancel'},
+            {text: 'End Trip', style: 'destructive', onPress: () => navigation.navigate('MainTabs')},
+          ])}>
           <Text style={s.endBtnText}>🏁 End Trip</Text>
         </TouchableOpacity>
       </View>
@@ -200,12 +185,23 @@ export default function NavigationScreen({navigation, route}) {
   );
 }
 
+function osrmStepIcon(type, modifier) {
+  if (type === 'arrive')                          return '🏁';
+  if (type === 'depart')                          return '🚦';
+  if (type === 'roundabout' || type === 'rotary') return '🔄';
+  if (!modifier)                                  return '⬆️';
+  if (modifier.indexOf('left')  !== -1) return modifier.indexOf('sharp') !== -1 ? '↰' : '↱';
+  if (modifier.indexOf('right') !== -1) return modifier.indexOf('sharp') !== -1 ? '↱' : '↰';
+  if (modifier === 'uturn')                       return '↩️';
+  return '⬆️';
+}
+
 const s = StyleSheet.create({
   container:     {flex: 1, backgroundColor: '#F7F8FA'},
   header:        {flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', paddingHorizontal: 16, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: '#EEE', elevation: 2},
   back:          {padding: 6, marginRight: 8},
   backArrow:     {fontSize: 22, color: '#1A1A1A'},
-  headerTitle:   {flex: 1, fontSize: 18, fontWeight: '700', color: '#1A1A1A'},
+  headerTitle:   {flex: 1, fontSize: 16, fontWeight: '700', color: '#1A1A1A'},
   timer:         {backgroundColor: '#EBF5F0', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10},
   timerText:     {fontSize: 13, fontWeight: '700', color: ACCENT},
   scoreBar:      {flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', paddingHorizontal: 16, paddingVertical: 10, gap: 8, borderBottomWidth: 1, borderBottomColor: '#F0F0F0'},
