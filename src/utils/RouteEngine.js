@@ -159,6 +159,25 @@ function costsToScores(costs) {
   });
 }
 
+// ── Find high-crime barangays near a route ────────────────────────────────────
+// Returns coordinates of barangays with high crime penalty near the direct path
+function getAvoidanceWaypoints(originCoords, destCoords, heatmapPoints, threshold = 0.6) {
+  if (!heatmapPoints || heatmapPoints.length === 0) return [];
+
+  // Get midpoint of direct route
+  const midLat = (originCoords[0] + destCoords[0]) / 2;
+  const midLng = (originCoords[1] + destCoords[1]) / 2;
+
+  // Find high-crime barangays within 800m of the direct route midpoint
+  const highCrime = heatmapPoints
+    .filter(b => b.crime_penalty >= threshold)
+    .filter(b => haversine([midLat, midLng], [b.lat, b.lng]) < 800)
+    .sort((a, b) => b.crime_penalty - a.crime_penalty)
+    .slice(0, 2); // max 2 avoidance points
+
+  return highCrime.map(b => [b.lat, b.lng]);
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 // heatmapPoints: the array from /heatmap API, passed in from HomeScreen/RouteOptions
 export async function computeRoutes(originCoords, destCoords, heatmapPoints = []) {
@@ -172,14 +191,25 @@ export async function computeRoutes(originCoords, destCoords, heatmapPoints = []
   const goingNorth = destCoords[0] > originCoords[0];
   const perpDir    = goingEast ? (goingNorth ? 'NW' : 'SW') : (goingNorth ? 'NE' : 'SE');
 
+  // Find high-crime barangays to avoid for the safest route
+  const avoidWaypoints = getAvoidanceWaypoints(originCoords, destCoords, heatmapPoints);
+  console.log('[routeEngine] avoidance waypoints:', avoidWaypoints.length);
+
+  // Build safest route waypoints — route around high-crime areas
+  const safestWaypoints = avoidWaypoints.length > 0
+    ? [originCoords, ...avoidWaypoints.map(w => nudge(w, 'W', 300)), destCoords]
+    : [nudge(originCoords, 'W', 200), destCoords];
+
   // Fetch 3 geometrically different routes
   const [fastestRaw, balancedRaw, safestRaw] = await Promise.all([
     fetchOSRM([originCoords, destCoords]),
     fetchOSRM([nudge(originCoords, perpDir, 150), destCoords])
       .catch(() => fetchOSRM([originCoords, destCoords])),
-    fetchOSRM([nudge(originCoords, 'W', 200), destCoords])
-      .catch(() => fetchOSRM([originCoords, destCoords])),
+    fetchOSRM(safestWaypoints)
+      .catch(() => fetchOSRM([nudge(originCoords, 'W', 200), destCoords])),
   ]);
+
+  // rest of the function stays the same...
 
   const fastestPoly  = snapToRealOrigin(decodePoly(fastestRaw.geometry),  originCoords);
   const balancedPoly = snapToRealOrigin(decodePoly(balancedRaw.geometry), originCoords);
