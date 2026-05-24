@@ -9,25 +9,38 @@ import {buildLeafletHTML, PASAY_CENTER} from '../utils/LeafletMap';
 
 const ACCENT = '#2D6A4F';
 
-// Nominatim geocoder — free, no API key, Philippines-scoped
+// Pasay City bounding box (west, south, east, north) with small buffer
+const PASAY_BOUNDS = { west: 120.9750, south: 14.5200, east: 121.0200, north: 14.5650 };
+
+// Nominatim geocoder restricted to Pasay City only
 const geocode = async (query) => {
   if (!query || query.trim().length < 3) return [];
   try {
+    const {west, south, east, north} = PASAY_BOUNDS;
     const url =
       `https://nominatim.openstreetmap.org/search` +
-      `?q=${encodeURIComponent(query)}` +
+      `?q=${encodeURIComponent(query)},+Pasay+City` +
       `&format=json&limit=6&countrycodes=ph` +
+      `&viewbox=${west},${north},${east},${south}` +
+      `&bounded=1` +
       `&accept-language=en`;
     const res = await fetch(url, {
       headers: {'User-Agent': 'SafeCommutePH/1.0'},
     });
     const json = await res.json();
-    return json.map(r => ({
-      id:   r.place_id,
-      name: r.display_name,
-      lat:  parseFloat(r.lat),
-      lng:  parseFloat(r.lon),
-    }));
+    // Client-side guard — drop anything outside the bounding box
+    return json
+      .filter(r => {
+        const lat = parseFloat(r.lat);
+        const lng = parseFloat(r.lon);
+        return lat >= south && lat <= north && lng >= west && lng <= east;
+      })
+      .map(r => ({
+        id:   r.place_id,
+        name: r.display_name,
+        lat:  parseFloat(r.lat),
+        lng:  parseFloat(r.lon),
+      }));
   } catch {
     return [];
   }

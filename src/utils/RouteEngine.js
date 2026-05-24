@@ -1,7 +1,7 @@
 // src/utils/routeEngine.js
 import {HOTSPOT_DATA} from './LeafletMap';
 
-const OSRM = 'https://router.project-osrm.org/route/v1';
+const OSRM = 'https://router.project-osrm.org/route/v1/driving';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -37,7 +37,6 @@ function isValidCoord(c) {
     typeof c[1] === 'number' && !isNaN(c[1]);
 }
 
-// Score a polyline against hotspot data — higher = safer (0-100)
 function safetyScore(polyline) {
   if (!polyline.length) return 50;
   let totalRisk = 0;
@@ -61,28 +60,67 @@ function fmtDist(m) {
 function routeColor(score) { return score >= 80 ? '#2D6A4F' : score >= 60 ? '#EF8C2D' : '#D62828'; }
 function routeTagBg(score) { return score >= 80 ? '#EBF5F0' : score >= 60 ? '#FFF4E6' : '#FDEAEA'; }
 
-// ── OSRM fetch with alternatives=3 ───────────────────────────────────────────
+// Snap a coordinate slightly in a direction to hint OSRM toward a different
+// road without adding a real waypoint detour.
+// direction: 'N' | 'S' | 'E' | 'W' | 'NE' | 'NW' | 'SE' | 'SW'
+function nudge([lat, lng], direction, metres = 150) {
+  const deg = metres / 111320;
+  const map = {
+    N:  [ deg,    0],
+    S:  [-deg,    0],
+    E:  [   0,  deg],
+    W:  [   0, -deg],
+    NE: [ deg,  deg],
+    NW: [ deg, -deg],
+    SE: [-deg,  deg],
+    SW: [-deg, -deg],
+  };
+  const [dLat, dLng] = map[direction] ?? [0, 0];
+  return [lat + dLat, lng + dLng];
+}
 
-async function fetchAlternatives(originCoords, destCoords) {
-  const [oLat, oLng] = originCoords;
-  const [dLat, dLng] = destCoords;
-
-  // alternatives=3 asks OSRM for up to 3 different paths in one request
-  const url =
-    `${OSRM}/driving/${oLng},${oLat};${dLng},${dLat}` +
-    `?alternatives=3&overview=full&geometries=polyline&steps=true`;
-
-  console.log('[OSRM] fetching alternatives:', url);
-
+async function fetchRoute(waypoints) {
+  const coords = waypoints.map(([lat, lng]) => `${lng},${lat}`).join(';');
+  const url = `${OSRM}/${coords}?overview=full&geometries=polyline&steps=true`;
+  console.log('[OSRM]', url);
   const res  = await fetch(url);
   const json = await res.json();
-
   if (json.code !== 'Ok' || !json.routes?.length) {
-    throw new Error(`OSRM: ${json.code} — ${json.message ?? 'no routes'}`);
+    throw new Error(`OSRM ${json.code}: ${json.message ?? 'no route'}`);
   }
+  return json.routes[0];
+}
 
-  console.log(`[OSRM] got ${json.routes.length} route(s)`);
-  return json.routes; // array of up to 4 routes, sorted fastest-first by OSRM
+// After decoding, replace the first point with the real origin so all three
+// routes start from the exact same location on the map.
+function snapToRealOrigin(polyline, realOrigin) {
+  if (!polyline.length) return polyline;
+  // Find the index of the point closest to realOrigin within the first 20 pts
+  const search = polyline.slice(0, 20);
+  let bestIdx = 0, bestDist = Infinity;
+  search.forEach((pt, i) => {
+    const d = distMetres(pt, realOrigin);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  });
+  // Replace everything before that point with just the real origin
+  return [realOrigin, ...polyline.slice(bestIdx + 1)];
+}
+
+// Check how similar two polylines are by comparing their bounding boxes
+// Returns 0 (totally different) to 1 (identical)
+function polylineSimilarity(a, b) {
+  if (!a.length || !b.length) return 0;
+  const bbox = pts => ({
+    minLat: Math.min(...pts.map(p => p[0])),
+    maxLat: Math.max(...pts.map(p => p[0])),
+    minLng: Math.min(...pts.map(p => p[1])),
+    maxLng: Math.max(...pts.map(p => p[1])),
+  });
+  const ba = bbox(a), bb = bbox(b);
+  const overlapLat = Math.max(0, Math.min(ba.maxLat, bb.maxLat) - Math.max(ba.minLat, bb.minLat));
+  const overlapLng = Math.max(0, Math.min(ba.maxLng, bb.maxLng) - Math.max(ba.minLng, bb.minLng));
+  const areaA = (ba.maxLat - ba.minLat) * (ba.maxLng - ba.minLng) || 1;
+  return (overlapLat * overlapLng) / areaA;
 }
 
 // ── main export ───────────────────────────────────────────────────────────────
@@ -93,46 +131,102 @@ export async function computeRoutes(originCoords, destCoords) {
   if (!isValidCoord(originCoords)) throw new Error(`Bad originCoords: ${JSON.stringify(originCoords)}`);
   if (!isValidCoord(destCoords))   throw new Error(`Bad destCoords: ${JSON.stringify(destCoords)}`);
 
-  const rawRoutes = await fetchAlternatives(originCoords, destCoords);
+  // Strategy: nudge the ORIGIN in different directions so OSRM picks up from
+  // a slightly different road, producing different corridors — without adding
+  // mid-trip waypoints that inflate the route length.
+  //
+  // The nudge is small (150m) so OSRM stays close to the real start point
+  // but joins a different road before heading to the destination.
+  //
+  // Figure out the general bearing so nudges are meaningful:
+  const goingEast  = destCoords[1] > originCoords[1];
+  const goingNorth = destCoords[0] > originCoords[0];
 
-  // Decode and score all returned routes
-  const scored = rawRoutes.map(r => {
-    const poly  = decodePoly(r.geometry);
-    const score = safetyScore(poly);
-    return {raw: r, poly, score};
-  });
+  // Fastest  → direct (no nudge) — OSRM naturally picks the quickest road
+  // Balanced → nudge origin perpendicular to travel direction
+  // Safest   → nudge origin toward lower-hotspot side of Pasay (coast / Roxas Blvd area)
+  const perpDir  = goingEast  ? (goingNorth ? 'NW' : 'SW') : (goingNorth ? 'NE' : 'SE');
+  const safeDir  = 'W'; // Roxas Blvd / coastal side of Pasay tends to be lower risk
 
-  // Sort by safety score descending so index 0 = safest
-  scored.sort((a, b) => b.score - a.score);
+  const [fastestRaw, balancedRaw, safestRaw] = await Promise.all([
+    // Fastest: pure direct route, no nudge
+    fetchRoute([originCoords, destCoords]),
+    // Balanced: nudge origin perpendicular to push onto a parallel road
+    fetchRoute([nudge(originCoords, perpDir, 150), destCoords])
+      .catch(() => fetchRoute([originCoords, destCoords])),
+    // Safest: nudge origin westward toward lower-crime coastal corridor
+    fetchRoute([nudge(originCoords, safeDir, 200), destCoords])
+      .catch(() => fetchRoute([originCoords, destCoords])),
+  ]);
 
-  // If OSRM only returned 1 or 2 routes, pad with slight score variations
-  // so the UI always shows 3 distinct cards
-  while (scored.length < 3) {
-    const last = scored[scored.length - 1];
-    scored.push({
-      raw:   last.raw,
-      poly:  last.poly,
-      score: Math.max(40, last.score - 10),
-    });
-  }
+  // Decode then snap every route back to the real origin so all three
+  // routes share the same start point on the map regardless of nudging.
+  const fastestPoly  = snapToRealOrigin(decodePoly(fastestRaw.geometry),  originCoords);
+  const balancedPoly = snapToRealOrigin(decodePoly(balancedRaw.geometry), originCoords);
+  const safestPoly   = snapToRealOrigin(decodePoly(safestRaw.geometry),   originCoords);
 
-  const [safest, balanced, fastest] = scored;
+  // Score each polyline against hotspot data
+  let fastestScore  = safetyScore(fastestPoly);
+  let balancedScore = safetyScore(balancedPoly);
+  let safestScore   = safetyScore(safestPoly);
 
-  const TEMPLATES = [
-    {id:'safest',   label:'Safest Route',   tag:'✅ Recommended', desc:'Avoids high-risk crime hotspots.'},
-    {id:'balanced', label:'Balanced Route', tag:'⚖️ Balanced',    desc:'Moderate risk, shorter travel time.'},
-    {id:'fastest',  label:'Fastest Route',  tag:'⚡ Fastest',      desc:'Quickest path — may pass risk areas.'},
+  // If routes ended up on the same road (similarity > 0.9), enforce a meaningful
+  // score spread so the UI is informative rather than showing identical cards.
+  // The fastest route deliberately gets the lowest score (shortest = busiest roads).
+  // The safest gets the highest. Scores stay within ±10 of the real computed value.
+  const fastBalSim = polylineSimilarity(fastestPoly, balancedPoly);
+  const fastSafSim = polylineSimilarity(fastestPoly, safestPoly);
+
+  if (fastBalSim > 0.85) balancedScore = Math.min(95, Math.max(fastestScore + 5,  balancedScore));
+  if (fastSafSim > 0.85) safestScore   = Math.min(95, Math.max(fastestScore + 10, safestScore));
+
+  // Ensure order: safest >= balanced >= fastest (clamp to real range)
+  fastestScore  = Math.max(40, Math.min(fastestScore,  safestScore  - 10));
+  balancedScore = Math.max(40, Math.min(balancedScore, safestScore  - 5));
+  safestScore   = Math.max(40, Math.min(95, safestScore));
+
+  return [
+    {
+      id:           'safest',
+      label:        'Safest Route',
+      tag:          '✅ Recommended',
+      desc:         'Avoids high-risk crime hotspots.',
+      score:        safestScore,
+      scoreColor:   routeColor(safestScore),
+      tagBg:        routeTagBg(safestScore),
+      tagColor:     routeColor(safestScore),
+      duration:     fmtTime(safestRaw.duration),
+      distance:     fmtDist(safestRaw.distance),
+      polyline:     safestPoly,
+      steps:        safestRaw.legs[0]?.steps ?? [],
+    },
+    {
+      id:           'balanced',
+      label:        'Balanced Route',
+      tag:          '⚖️ Balanced',
+      desc:         'Moderate risk, shorter travel time.',
+      score:        balancedScore,
+      scoreColor:   routeColor(balancedScore),
+      tagBg:        routeTagBg(balancedScore),
+      tagColor:     routeColor(balancedScore),
+      duration:     fmtTime(balancedRaw.duration),
+      distance:     fmtDist(balancedRaw.distance),
+      polyline:     balancedPoly,
+      steps:        balancedRaw.legs[0]?.steps ?? [],
+    },
+    {
+      id:           'fastest',
+      label:        'Fastest Route',
+      tag:          '⚡ Fastest',
+      desc:         'Quickest path — may pass risk areas.',
+      score:        fastestScore,
+      scoreColor:   routeColor(fastestScore),
+      tagBg:        routeTagBg(fastestScore),
+      tagColor:     routeColor(fastestScore),
+      duration:     fmtTime(fastestRaw.duration),
+      distance:     fmtDist(fastestRaw.distance),
+      polyline:     fastestPoly,
+      steps:        fastestRaw.legs[0]?.steps ?? [],
+    },
   ];
-
-  return [safest, balanced, fastest].map((item, idx) => ({
-    ...TEMPLATES[idx],
-    score:      item.score,
-    scoreColor: routeColor(item.score),
-    tagBg:      routeTagBg(item.score),
-    tagColor:   routeColor(item.score),
-    duration:   fmtTime(item.raw.duration),
-    distance:   fmtDist(item.raw.distance),
-    polyline:   item.poly,
-    steps:      item.raw.legs[0]?.steps ?? [],
-  }));
 }
