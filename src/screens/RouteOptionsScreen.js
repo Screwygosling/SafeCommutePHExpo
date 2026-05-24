@@ -1,6 +1,6 @@
 import React, {useState, useEffect} from 'react';
 import {View, Text, TouchableOpacity, Switch, StyleSheet, SafeAreaView, ScrollView, ActivityIndicator} from 'react-native';
-import {computeRoutes} from '../utils/RouteEngine';
+import {computeRoutes} from '../utils/routeEngine';
 
 const ACCENT = '#2D6A4F', DANGER = '#D62828', WARN = '#EF8C2D';
 
@@ -13,10 +13,11 @@ const isValidCoord = (c) =>
 
 export default function RouteOptionsScreen({navigation, route}) {
   const {
-    origin       = 'Current Location',
-    destination  = 'My Destination',
-    originCoords = null,
-    destCoords   = null,
+    origin        = 'Current Location',
+    destination   = 'My Destination',
+    originCoords  = null,
+    destCoords    = null,
+    heatmapPoints = [],   // passed from HomeScreen after /heatmap fetch
   } = route?.params || {};
 
   const safeOrigin = isValidCoord(originCoords) ? originCoords : DEFAULT_ORIGIN;
@@ -34,7 +35,7 @@ export default function RouteOptionsScreen({navigation, route}) {
     setLoading(true);
     setError(null);
     try {
-      const data = await computeRoutes(safeOrigin, safeDest);
+      const data = await computeRoutes(safeOrigin, safeDest, heatmapPoints);
       setRoutes(data);
       setSelected(data[0]?.id ?? 'safest');
     } catch (e) {
