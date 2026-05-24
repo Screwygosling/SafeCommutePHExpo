@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const BASE_URL = 'https://thesisml.onrender.com'; // update after deploy
+const BASE_URL = 'https://thesisml.onrender.com'; // render server URL
 
 export const getCrimeHeatmapData = async () => {
   console.log('Calling API:', `${BASE_URL}/heatmap`);

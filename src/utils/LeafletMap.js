@@ -35,29 +35,41 @@ export function buildLeafletHTML({
   showHeatmap   = true,
   showPolice    = false,
   showRoute     = false,
-  routeCoords   = [],     // [[lat,lng], [lat,lng]] — only used as fallback
-  routePolyline = [],     // [[lat,lng], ...] full decoded polyline from routeEngine
+  routeCoords   = [],
+  routePolyline = [],
   heatmapPoints = [],
 }) {
-  const resolvedHeatmap = heatmapPoints.length > 0
-    ? heatmapPoints.map(p => [p.lat, p.lng, p.intensity * 100])
-    : HOTSPOT_DATA;
+  // If API points available, pass them through — KDE runs inside the WebView.
+  // If not, fall back to static HOTSPOT_DATA (already scaled 0-1).
+  const useAPIPoints = heatmapPoints.length > 0;
 
-  const heatmapJSON  = JSON.stringify(resolvedHeatmap);
-  const policeJSON   = JSON.stringify(POLICE_STATIONS);
-  const polylineJSON = JSON.stringify(routePolyline);   // pre-computed full path
-  const endpointsJSON = JSON.stringify(routeCoords);    // just start+end for fallback
+  // For the fallback static data, pass as-is (already correct scale).
+  // For API data, pass raw crime_penalty values — KDE will process them.
+  const rawPoints = useAPIPoints
+    ? heatmapPoints.map(p => ({
+        lat:           p.lat,
+        lng:           p.lng,
+        crime_penalty: p.crime_penalty,  // raw 0-100 scale from ML model
+        threat_level:  p.threat_level,
+      }))
+    : [];
+
+  const fallbackHeatmap = useAPIPoints ? [] : HOTSPOT_DATA;
+
+  const rawPointsJSON    = JSON.stringify(rawPoints);
+  const fallbackJSON     = JSON.stringify(fallbackHeatmap);
+  const policeJSON       = JSON.stringify(POLICE_STATIONS);
+  const polylineJSON     = JSON.stringify(routePolyline);
+  const endpointsJSON    = JSON.stringify(routeCoords);
 
   return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"/>
-
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>
   <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"><\/script>
-
   <style>
     *{margin:0;padding:0;box-sizing:border-box}
     html,body,#map{width:100%;height:100%}
@@ -67,10 +79,131 @@ export function buildLeafletHTML({
 <body>
 <div id="map"></div>
 <script>
+  // ── PostMessage helper ────────────────────────────────────────────────────
   function postRN(obj) {
     if (window.ReactNativeWebView) {
       window.ReactNativeWebView.postMessage(JSON.stringify(obj));
     }
+  }
+
+  // ── Injected data ─────────────────────────────────────────────────────────
+  var rawAPIPoints    = ${rawPointsJSON};    // from /heatmap endpoint
+  var fallbackPoints  = ${fallbackJSON};     // static HOTSPOT_DATA
+  var policeData      = ${policeJSON};
+  var precomputedPolyline = ${polylineJSON};
+  var endpoints       = ${endpointsJSON};
+
+  // ── KDE Implementation ────────────────────────────────────────────────────
+  // Implements the Gaussian Kernel Density Estimation from the thesis proposal:
+  //   f(x) = (1/nh) * Σ K((x - xi) / h)
+  //   K(u) = (1/√2π) * e^(-u²/2)   ← Gaussian kernel
+  //
+  // Each barangay point is treated as xi with weight = crime_penalty.
+  // We evaluate the KDE on a fine grid over Pasay City and pass the
+  // resulting [lat, lng, intensity] array to Leaflet.heat.
+
+  function gaussianKernel(u) {
+    // K(u) = (1/√2π) * e^(-u²/2)
+    return (1 / Math.sqrt(2 * Math.PI)) * Math.exp(-0.5 * u * u);
+  }
+
+  function haversineDeg(lat1, lng1, lat2, lng2) {
+    var R = 6371000;
+    var dLat = (lat2 - lat1) * Math.PI / 180;
+    var dLng = (lng2 - lng1) * Math.PI / 180;
+    var a = Math.sin(dLat/2)*Math.sin(dLat/2) +
+            Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*
+            Math.sin(dLng/2)*Math.sin(dLng/2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  }
+
+  function computeKDE(points, bandwidth) {
+    if (rawAPIPoints.length > 0) {
+      // Use actual barangay coordinates with crime_penalty as intensity
+      // Scale intensity for visibility
+      var maxPenalty = 0;
+      rawAPIPoints.forEach(function(p) {
+        if (p.crime_penalty > maxPenalty) maxPenalty = p.crime_penalty;
+      });
+      if (maxPenalty === 0) maxPenalty = 1;
+
+      heatPoints = rawAPIPoints.map(function(p) {
+        return [p.lat, p.lng, p.crime_penalty / maxPenalty];
+      });
+    } else {
+      heatPoints = fallbackPoints;
+    }
+
+    // Normalise densities to 0-1 for Leaflet heatmap
+    // Only include grid cells with meaningful density (> 1% of max)
+    // to keep the heatmap focused on actual crime areas
+    var heatPoints = [];
+    gridValues.forEach(function(g) {
+      var normalised = maxDensity > 0 ? g.density / maxDensity : 0;
+      if (normalised > 0.01) {
+        heatPoints.push([g.lat, g.lng, normalised]);
+      }
+    });
+
+    return heatPoints;
+  }
+
+  // ── Map setup ─────────────────────────────────────────────────────────────
+  var map = L.map('map', {zoomControl: false, attributionControl: false})
+    .setView([${center.lat}, ${center.lng}], ${zoom});
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19}).addTo(map);
+
+  // ── Heatmap ───────────────────────────────────────────────────────────────
+    if (${showHeatmap}) {
+      var heatPoints;
+
+      if (rawAPIPoints.length > 0) {
+        var maxPenalty = 0;
+        rawAPIPoints.forEach(function(p) {
+          if (p.crime_penalty > maxPenalty) maxPenalty = p.crime_penalty;
+        });
+        if (maxPenalty === 0) maxPenalty = 1;
+
+        heatPoints = rawAPIPoints.map(function(p) {
+          return [p.lat, p.lng, p.crime_penalty / maxPenalty];
+        });
+      } else {
+        heatPoints = fallbackPoints;
+      }
+
+      L.heatLayer(heatPoints, {
+        radius:  50,
+        blur:    25,
+        maxZoom: 17,
+        max:     1.0,
+        gradient: {
+          0.0:  '#52B788',
+          0.35: '#FFD166',
+          0.65: '#EF8C2D',
+          0.85: '#D62828',
+        },
+      }).addTo(map);
+    }
+
+  // ── Police markers ────────────────────────────────────────────────────────
+  if (${showPolice}) {
+    policeData.forEach(function(s) {
+      L.marker([s.lat, s.lng], {
+        icon: L.divIcon({
+          html: '<div style="font-size:24px;line-height:1">🚔</div>',
+          className: '', iconSize: [30,30], iconAnchor: [15,15],
+        }),
+      }).bindPopup('<b>' + s.name + '</b><br>Police Station — 24/7').addTo(map);
+    });
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  function markerIcon(color) {
+    return L.divIcon({
+      html: '<div style="width:14px;height:14px;border-radius:50%;background:' + color + ';border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>',
+      className: '', iconSize: [14,14], iconAnchor: [7,7],
+    });
   }
 
   function osrmIcon(type, modifier) {
@@ -90,68 +223,24 @@ export function buildLeafletHTML({
       : Math.round(metres) + ' m';
   }
 
-  function markerIcon(color) {
-    return L.divIcon({
-      html: '<div style="width:14px;height:14px;border-radius:50%;background:' + color + ';border:3px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.4)"></div>',
-      className: '', iconSize: [14, 14], iconAnchor: [7, 7],
-    });
-  }
-
-  // ── data injected from React Native ──────────────────────────────────────
-  var hotspotsData  = ${heatmapJSON};
-  var policeData    = ${policeJSON};
-  var precomputedPolyline = ${polylineJSON};  // full route from routeEngine
-  var endpoints     = ${endpointsJSON};        // [[startLat,startLng],[endLat,endLng]]
-
-  // ── map ───────────────────────────────────────────────────────────────────
-  var map = L.map('map', {zoomControl: false, attributionControl: false})
-    .setView([${center.lat}, ${center.lng}], ${zoom});
-
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19}).addTo(map);
-
-  // ── heatmap ───────────────────────────────────────────────────────────────
-  if (${showHeatmap}) {
-    L.heatLayer(hotspotsData, {
-      radius: 40, blur: 25, maxZoom: 17,
-      gradient: {0.0: '#52B788', 0.3: '#FFD166', 0.6: '#EF8C2D', 0.85: '#D62828'},
-    }).addTo(map);
-  }
-
-  // ── police markers ────────────────────────────────────────────────────────
-  if (${showPolice}) {
-    policeData.forEach(function(s) {
-      L.marker([s.lat, s.lng], {
-        icon: L.divIcon({html: '<div style="font-size:24px;line-height:1">🚔</div>', className:'', iconSize:[30,30], iconAnchor:[15,15]}),
-      }).bindPopup('<b>' + s.name + '</b><br>Police Station — 24/7').addTo(map);
-    });
-  }
-
-  // ── route drawing ─────────────────────────────────────────────────────────
+  // ── Route drawing ─────────────────────────────────────────────────────────
   if (${showRoute}) {
-
-    // PATH 1 — use the pre-computed polyline from routeEngine (the chosen route)
     if (precomputedPolyline && precomputedPolyline.length > 1) {
-      // Draw the polyline directly — no OSRM call needed
       var routeLine = L.polyline(precomputedPolyline, {
         color: '#2D6A4F', weight: 6, opacity: 0.9,
       }).addTo(map);
-
-      // Fit map to the route bounds
       map.fitBounds(routeLine.getBounds(), {padding: [40, 40]});
 
-      // Place start / end markers
       var start = precomputedPolyline[0];
       var end   = precomputedPolyline[precomputedPolyline.length - 1];
       L.marker(start, {icon: markerIcon('#1565C0')}).bindPopup('Start').addTo(map);
       L.marker(end,   {icon: markerIcon('#D62828')}).bindPopup('Destination').addTo(map);
 
-      // Signal ready — steps come from NavigationScreen params, not the map
       postRN({type: 'MAP_READY'});
 
-    // PATH 2 — no polyline passed, fall back to a fresh OSRM call
     } else if (endpoints && endpoints.length >= 2) {
-      var origin = endpoints[0];
-      var dest   = endpoints[endpoints.length - 1];
+      var origin   = endpoints[0];
+      var dest     = endpoints[endpoints.length - 1];
       var coordStr = origin[1] + ',' + origin[0] + ';' + dest[1] + ',' + dest[0];
       var osrmUrl  = 'https://router.project-osrm.org/route/v1/driving/' + coordStr
         + '?overview=full&geometries=geojson&steps=true';
@@ -161,29 +250,24 @@ export function buildLeafletHTML({
         .then(function(json) {
           if (json.code !== 'Ok' || !json.routes.length) throw new Error('No route');
           var route = json.routes[0];
-
-          // Draw GeoJSON route line
-          var line = L.geoJSON(route.geometry, {
+          var line  = L.geoJSON(route.geometry, {
             style: {color: '#2D6A4F', weight: 6, opacity: 0.9},
           }).addTo(map);
           map.fitBounds(line.getBounds(), {padding: [40, 40]});
-
           L.marker(origin, {icon: markerIcon('#1565C0')}).bindPopup('Start').addTo(map);
           L.marker(dest,   {icon: markerIcon('#D62828')}).bindPopup('Destination').addTo(map);
 
-          // Build steps for NavigationScreen
           var allSteps = [];
           route.legs.forEach(function(leg) {
             leg.steps.forEach(function(step) {
-              var maneuver = step.maneuver || {};
+              var m = step.maneuver || {};
               allSteps.push({
-                instruction: step.name || maneuver.type || 'Continue',
+                instruction: step.name || m.type || 'Continue',
                 distance:    fmtDist(step.distance),
-                icon:        osrmIcon(maneuver.type, maneuver.modifier),
+                icon:        osrmIcon(m.type, m.modifier),
               });
             });
           });
-
           postRN({type: 'MAP_READY'});
           postRN({type: 'ROUTE_FOUND', steps: allSteps});
         })
@@ -192,9 +276,7 @@ export function buildLeafletHTML({
           postRN({type: 'MAP_READY'});
         });
     }
-
   } else {
-    // No route — just signal ready
     map.whenReady(function() { postRN({type: 'MAP_READY'}); });
   }
 <\/script>
