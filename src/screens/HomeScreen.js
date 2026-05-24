@@ -65,10 +65,27 @@ export default function HomeScreen({navigation}) {
   const [originLoading, setOriginLoading] = useState(false);
 
   const [activeInput, setActiveInput] = useState(null);     // 'origin' | 'dest' | null
-  const [mapReady,    setMapReady]    = useState(false);
+  const [mapReady,      setMapReady]      = useState(false);
+  const [heatmapPoints, setHeatmapPoints] = useState([]);
 
   const destTimer   = useRef(null);
   const originTimer = useRef(null);
+
+  // ── Fetch heatmap data from API on mount ─────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const res  = await fetch('https://thesisml.onrender.com/heatmap');
+        const json = await res.json();
+        if (json.points && json.points.length > 0) {
+          setHeatmapPoints(json.points);
+          console.log('[HomeScreen] heatmap loaded:', json.points.length, 'points');
+        }
+      } catch (e) {
+        console.warn('[HomeScreen] heatmap fetch failed:', e.message);
+      }
+    })();
+  }, []);
 
   // ── GPS: get current location on mount ───────────────────────────────────
   useEffect(() => {
@@ -144,10 +161,11 @@ export default function HomeScreen({navigation}) {
     const finalOrigin = originCoords ?? [PASAY_CENTER.lat, PASAY_CENTER.lng];
 
     navigation.navigate('RouteOptions', {
-      origin:       originText || 'Current Location',
-      destination:  destText,
-      originCoords: finalOrigin,
+      origin:        originText || 'Current Location',
+      destination:   destText,
+      originCoords:  finalOrigin,
       destCoords,
+      heatmapPoints, // pass API crime data for route scoring
     });
   };
 
