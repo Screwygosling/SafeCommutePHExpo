@@ -27,3 +27,13 @@ export const getRouteOptions = async (origin, destination) => {
   }, { timeout: 35000 });
   return response.data;
 };
+export const getCrimeIncidents = async () => {
+  console.log('[api] Fetching crime incidents...');
+  try {
+    const response = await axios.get(`${BASE_URL}/incidents`, {timeout: 35000});
+    return response.data.incidents ?? [];
+  } catch (e) {
+    console.warn('[api] getCrimeIncidents failed:', e.message);
+    return [];
+  }
+};

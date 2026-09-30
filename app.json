@@ -28,7 +28,8 @@
         "ACCESS_COARSE_LOCATION",
         "INTERNET"
       ],
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.anonymous.SafeCommutePHExpo3"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -37,6 +38,16 @@
       "allowedHosts": [
         "thesisml.onrender.com"
       ]
-    }
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "ndkVersion": "27.1.12297006"
+          }
+        }
+      ]
+    ]
   }
 }

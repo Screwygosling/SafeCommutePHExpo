@@ -1,22 +1,57 @@
-// src/utils/routeEngine.js
-// Implements: f'(u,v) = Σg(u,v) + h(u,v) + λ * crime_penalty(n)
-// crime_penalty values come from the /heatmap API (already fetched in HomeScreen)
-// passed in as heatmapPoints — no extra API calls needed during routing.
+// src/utils/RouteEngine.js
+// Calls the thesis ML server for crime-weighted A* routing
+// Falls back to OSRM-based scoring if server is unavailable
 
-const OSRM   = 'https://router.project-osrm.org/route/v1/driving';
-const LAMBDA = 15; // λ scaling factor — amplified because raw penalties are 0-1 scale
+const API_BASE = 'https://thesisml.onrender.com';
+const OSRM     = 'https://router.project-osrm.org/route/v1/driving';
 
-// ── Haversine h(u,v) ──────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function isValidCoord(c) {
+  return Array.isArray(c) && c.length >= 2 &&
+    typeof c[0] === 'number' && !isNaN(c[0]) &&
+    typeof c[1] === 'number' && !isNaN(c[1]);
+}
+
+function fmtTime(s) {
+  const m = Math.round(s / 60);
+  return m >= 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m} min`;
+}
+function fmtDist(m) {
+  return m >= 1000 ? `${(m/1000).toFixed(1)} km` : `${Math.round(m)} m`;
+}
+function routeColor(score) { return score >= 80 ? '#2D6A4F' : score >= 60 ? '#EF8C2D' : '#D62828'; }
+function routeTagBg(score) { return score >= 80 ? '#EBF5F0' : score >= 60 ? '#FFF4E6' : '#FDEAEA'; }
+
+// ── Primary: call /safe-route on thesis ML server ─────────────────────────────
+async function fetchFromServer(originCoords, destCoords) {
+  const res  = await fetch(`${API_BASE}/safe-route`, {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({
+      origin_lat: originCoords[0],
+      origin_lng: originCoords[1],
+      dest_lat:   destCoords[0],
+      dest_lng:   destCoords[1],
+    }),
+  });
+
+  if (!res.ok) throw new Error(`Server returned ${res.status}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  return json.routes;
+}
+
+// ── Fallback: OSRM + crime scoring ───────────────────────────────────────────
 function haversine(a, b) {
   const R    = 6371000;
   const dLat = (b[0] - a[0]) * Math.PI / 180;
   const dLng = (b[1] - a[1]) * Math.PI / 180;
-  const s    =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(a[0] * Math.PI / 180) *
-    Math.cos(b[0] * Math.PI / 180) *
-    Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s));
+  const s    = Math.min(1, Math.max(0,
+    Math.sin(dLat/2)**2 +
+    Math.cos(a[0]*Math.PI/180) * Math.cos(b[0]*Math.PI/180) *
+    Math.sin(dLng/2)**2
+  ));
+  return R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1-s));
 }
 
 function decodePoly(encoded) {
@@ -34,239 +69,134 @@ function decodePoly(encoded) {
   return pts;
 }
 
-function isValidCoord(c) {
-  return Array.isArray(c) && c.length >= 2 &&
-    typeof c[0] === 'number' && !isNaN(c[0]) &&
-    typeof c[1] === 'number' && !isNaN(c[1]);
-}
-
-// ── crime_penalty(n) from heatmap data ───────────────────────────────────────
-// For a given [lat,lng] point, find the nearest barangay and return its
-// crime_penalty from the API data. Influence radius: 500m (barangay-level).
 function getCrimePenalty(point, heatmapPoints) {
-  if (!heatmapPoints || heatmapPoints.length === 0) return 0.4; // fallback
-
-  let nearest     = null;
-  let nearestDist = Infinity;
-
-  heatmapPoints.forEach(function(b) {
+  if (!heatmapPoints || !heatmapPoints.length) return 40;
+  let best = 40, bestD = Infinity;
+  heatmapPoints.forEach(b => {
     const d = haversine(point, [b.lat, b.lng]);
-    if (d < nearestDist) {
-      nearestDist = d;
-      nearest     = b;
-    }
+    if (d < bestD) { bestD = d; best = b.crime_penalty; }
   });
-
-  // Only apply penalty if within 500m of a barangay centroid
-  // Beyond that, use the city average (0.4)
-  if (nearestDist > 500) return 0.4;
-  return nearest ? nearest.crime_penalty : 0.4;
+  return bestD < 600 ? best : 40;
 }
 
-// ── Apply thesis formula to score a route ────────────────────────────────────
-// f'(u,v) = Σ [ g(u,v) + h(u,v) + λ * crime_penalty(n) ]
-// Lower total cost = safer route
-function scoreRoute(polyline, destCoords, gDistance, heatmapPoints) {
-  if (!polyline.length) return {score: 50, totalCost: 999999};
-
-  // Sample up to 8 points evenly along the route
-  const sampleCount = Math.min(8, polyline.length);
-  const step        = Math.max(1, Math.floor(polyline.length / sampleCount));
-  const samples     = [];
-  for (let i = 0; i < polyline.length; i += step) {
-    samples.push(polyline[i]);
-    if (samples.length >= sampleCount) break;
-  }
-
-  let totalCost = 0;
-  const segDist = gDistance / samples.length; // g(u,v) per segment
-
-  const penalties = [];
-  samples.forEach(function(pt) {
-    const g       = segDist;                              // distance component
-    const h       = haversine(pt, destCoords);            // haversine heuristic
-    const penalty = getCrimePenalty(pt, heatmapPoints);  // crime_penalty(n) from API
-    const cost    = g + h + LAMBDA * penalty * 1000;     // λ * penalty (scaled to metres)
-    penalties.push(penalty);
-    totalCost += cost;
+function snapToOrigin(poly, origin) {
+  if (!poly.length) return poly;
+  let bestIdx = 0, bestD = Infinity;
+  poly.slice(0, 20).forEach((pt, i) => {
+    const d = haversine(pt, origin);
+    if (d < bestD) { bestD = d; bestIdx = i; }
   });
-
-  const avgPenalty = penalties.reduce((a, b) => a + b, 0) / penalties.length;
-  const maxPenalty = Math.max(...penalties);
-
-  console.log('[score] avgPenalty:', avgPenalty.toFixed(4),
-    'maxPenalty:', maxPenalty.toFixed(4),
-    'totalCost:', Math.round(totalCost));
-
-  return {totalCost, avgPenalty, maxPenalty};
+  return [origin, ...poly.slice(bestIdx + 1)];
 }
 
-// ── OSRM fetch ────────────────────────────────────────────────────────────────
+function nudge([lat, lng], dir, m = 150) {
+  const d = m / 111320;
+  const offsets = {N:[d,0],S:[-d,0],E:[0,d],W:[0,-d],NE:[d,d],NW:[d,-d],SE:[-d,d],SW:[-d,-d]};
+  const [dLat, dLng] = offsets[dir] ?? [0,0];
+  return [lat+dLat, lng+dLng];
+}
+
 async function fetchOSRM(waypoints) {
-  const coords = waypoints.map(([lat, lng]) => `${lng},${lat}`).join(';');
-  const url    = `${OSRM}/${coords}?overview=full&geometries=polyline&steps=true`;
-  console.log('[OSRM]', url);
-  const res    = await fetch(url);
+  const coords = waypoints.map(([lat,lng]) => `${lng},${lat}`).join(';');
+  const res    = await fetch(`${OSRM}/${coords}?overview=full&geometries=polyline&steps=true`);
   const json   = await res.json();
-  if (json.code !== 'Ok' || !json.routes?.length) {
-    throw new Error(`OSRM ${json.code}: ${json.message ?? 'no route'}`);
-  }
+  if (json.code !== 'Ok' || !json.routes?.length) throw new Error('OSRM no route');
   return json.routes[0];
 }
 
-function snapToRealOrigin(polyline, realOrigin) {
-  if (!polyline.length) return polyline;
-  let bestIdx = 0, bestDist = Infinity;
-  polyline.slice(0, 20).forEach((pt, i) => {
-    const d = haversine(pt, realOrigin);
-    if (d < bestDist) { bestDist = d; bestIdx = i; }
+function scoreRoute(poly, dest, dist, heatmapPoints) {
+  if (!poly.length) return 999999;
+  const n     = Math.min(8, poly.length);
+  const step  = Math.max(1, Math.floor(poly.length / n));
+  const samp  = [];
+  for (let i = 0; i < poly.length && samp.length < n; i += step) samp.push(poly[i]);
+
+  let cost = 0;
+  const segDist = dist / samp.length;
+  samp.forEach(pt => {
+    cost += segDist + haversine(pt, dest) + 0.015 * getCrimePenalty(pt, heatmapPoints) * 1000;
   });
-  return [realOrigin, ...polyline.slice(bestIdx + 1)];
+  return cost;
 }
 
-function nudge([lat, lng], direction, metres = 150) {
-  const deg = metres / 111320;
-  const map = {
-    N: [deg, 0], S: [-deg, 0], E: [0, deg], W: [0, -deg],
-    NE: [deg, deg], NW: [deg, -deg], SE: [-deg, deg], SW: [-deg, -deg],
-  };
-  const [dLat, dLng] = map[direction] ?? [0, 0];
-  return [lat + dLat, lng + dLng];
-}
-
-function fmtTime(s) {
-  const m = Math.round(s / 60);
-  return m >= 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m} min`;
-}
-function fmtDist(m) {
-  return m >= 1000 ? `${(m/1000).toFixed(1)} km` : `${Math.round(m)} m`;
-}
-function routeColor(score) { return score >= 80 ? '#2D6A4F' : score >= 60 ? '#EF8C2D' : '#D62828'; }
-function routeTagBg(score) { return score >= 80 ? '#EBF5F0' : score >= 60 ? '#FFF4E6' : '#FDEAEA'; }
-
-// ── Convert total cost → safety score (0-100, higher = safer) ────────────────
-// We rank the 3 routes relative to each other so differences are always visible
 function costsToScores(costs) {
-  const sorted = [...costs].sort((a, b) => a - b); // ascending: lowest cost = safest
-  const min    = sorted[0];
-  const max    = sorted[sorted.length - 1];
-  const range  = max - min || 1;
-
-  return costs.map(cost => {
-    // Invert: lowest cost → score near 90, highest → score near 55
-    const normalised = (cost - min) / range;          // 0 = safest, 1 = riskiest
-    return Math.round(90 - normalised * 35);           // maps to 55-90 range
-  });
+  const min = Math.min(...costs), max = Math.max(...costs);
+  const rng = (max - min) || 1;
+  return costs.map(c => Math.round(90 - ((c - min) / rng) * 35));
 }
 
-// ── Find high-crime barangays near a route ────────────────────────────────────
-// Returns coordinates of barangays with high crime penalty near the direct path
-function getAvoidanceWaypoints(originCoords, destCoords, heatmapPoints, threshold = 0.6) {
-  if (!heatmapPoints || heatmapPoints.length === 0) return [];
+async function fetchFallbackRoutes(originCoords, destCoords, heatmapPoints) {
+  const goE   = destCoords[1] > originCoords[1];
+  const goN   = destCoords[0] > originCoords[0];
+  const perp  = goE ? (goN ? 'NW' : 'SW') : (goN ? 'NE' : 'SE');
 
-  // Get midpoint of direct route
-  const midLat = (originCoords[0] + destCoords[0]) / 2;
-  const midLng = (originCoords[1] + destCoords[1]) / 2;
-
-  // Find high-crime barangays within 800m of the direct route midpoint
-  const highCrime = heatmapPoints
-    .filter(b => b.crime_penalty >= threshold)
-    .filter(b => haversine([midLat, midLng], [b.lat, b.lng]) < 800)
-    .sort((a, b) => b.crime_penalty - a.crime_penalty)
-    .slice(0, 2); // max 2 avoidance points
-
-  return highCrime.map(b => [b.lat, b.lng]);
-}
-
-// ── Main export ───────────────────────────────────────────────────────────────
-// heatmapPoints: the array from /heatmap API, passed in from HomeScreen/RouteOptions
-export async function computeRoutes(originCoords, destCoords, heatmapPoints = []) {
-  console.log('[routeEngine] origin:', originCoords, 'dest:', destCoords,
-    'heatmap points:', heatmapPoints.length);
-
-  if (!isValidCoord(originCoords)) throw new Error(`Bad originCoords: ${JSON.stringify(originCoords)}`);
-  if (!isValidCoord(destCoords))   throw new Error(`Bad destCoords: ${JSON.stringify(destCoords)}`);
-
-  const goingEast  = destCoords[1] > originCoords[1];
-  const goingNorth = destCoords[0] > originCoords[0];
-  const perpDir    = goingEast ? (goingNorth ? 'NW' : 'SW') : (goingNorth ? 'NE' : 'SE');
-
-  // Find high-crime barangays to avoid for the safest route
-  const avoidWaypoints = getAvoidanceWaypoints(originCoords, destCoords, heatmapPoints);
-  console.log('[routeEngine] avoidance waypoints:', avoidWaypoints.length);
-
-  // Build safest route waypoints — route around high-crime areas
-  const safestWaypoints = avoidWaypoints.length > 0
-    ? [originCoords, ...avoidWaypoints.map(w => nudge(w, 'W', 300)), destCoords]
-    : [nudge(originCoords, 'W', 200), destCoords];
-
-  // Fetch 3 geometrically different routes
-  const [fastestRaw, balancedRaw, safestRaw] = await Promise.all([
+  const [r1, r2, r3] = await Promise.all([
     fetchOSRM([originCoords, destCoords]),
-    fetchOSRM([nudge(originCoords, perpDir, 150), destCoords])
-      .catch(() => fetchOSRM([originCoords, destCoords])),
-    fetchOSRM(safestWaypoints)
-      .catch(() => fetchOSRM([nudge(originCoords, 'W', 200), destCoords])),
+    fetchOSRM([nudge(originCoords, perp, 150), destCoords]).catch(() => fetchOSRM([originCoords, destCoords])),
+    fetchOSRM([nudge(originCoords, 'W', 200), destCoords]).catch(() => fetchOSRM([originCoords, destCoords])),
   ]);
 
-  // rest of the function stays the same...
+  const p1 = snapToOrigin(decodePoly(r1.geometry), originCoords);
+  const p2 = snapToOrigin(decodePoly(r2.geometry), originCoords);
+  const p3 = snapToOrigin(decodePoly(r3.geometry), originCoords);
 
-  const fastestPoly  = snapToRealOrigin(decodePoly(fastestRaw.geometry),  originCoords);
-  const balancedPoly = snapToRealOrigin(decodePoly(balancedRaw.geometry), originCoords);
-  const safestPoly   = snapToRealOrigin(decodePoly(safestRaw.geometry),   originCoords);
+  const costs   = [r1, r2, r3].map((r, i) => scoreRoute([p1,p2,p3][i], destCoords, r.distance, heatmapPoints));
+  const cands   = [{raw:r1,poly:p1},{raw:r2,poly:p2},{raw:r3,poly:p3}]
+    .map((c,i) => ({...c, cost:costs[i]}))
+    .sort((a,b) => a.cost - b.cost);
+  const scores  = costsToScores(cands.map(c => c.cost));
 
-  // Apply thesis formula to each route using real heatmap crime_penalty values
-  const fastestResult  = scoreRoute(fastestPoly,  destCoords, fastestRaw.distance,  heatmapPoints);
-  const balancedResult = scoreRoute(balancedPoly, destCoords, balancedRaw.distance, heatmapPoints);
-  const safestResult   = scoreRoute(safestPoly,   destCoords, safestRaw.distance,   heatmapPoints);
-
-  // Rank by cost: lowest cost = safest
-  // Sort all three and assign labels accordingly
-  const candidates = [
-    {raw: fastestRaw,  poly: fastestPoly,  result: fastestResult,  origLabel: 'fastest'},
-    {raw: balancedRaw, poly: balancedPoly, result: balancedResult, origLabel: 'balanced'},
-    {raw: safestRaw,   poly: safestPoly,   result: safestResult,   origLabel: 'safest'},
+  const TMPL = [
+    {id:'safest',   label:'Safest Route',   tag:'✅ Recommended', desc:'Lowest crime-weighted cost.'},
+    {id:'balanced', label:'Balanced Route', tag:'⚖️ Balanced',    desc:'Moderate crime penalty.'},
+    {id:'fastest',  label:'Fastest Route',  tag:'⚡ Fastest',      desc:'Shortest time, higher crime risk.'},
   ];
 
-  // Sort by totalCost ascending — lowest cost route gets the "Safest" label
-  candidates.sort((a, b) => a.result.totalCost - b.result.totalCost);
-
-  const costs  = candidates.map(c => c.result.totalCost);
-  const scores = costsToScores(costs);
-
-  const TEMPLATES = [
-    {
-      id:    'safest',
-      label: 'Safest Route',
-      tag:   '✅ Recommended',
-      desc:  'Lowest crime-weighted cost. Avoids high-penalty barangays.',
-    },
-    {
-      id:    'balanced',
-      label: 'Balanced Route',
-      tag:   '⚖️ Balanced',
-      desc:  'Moderate crime penalty, shorter travel time.',
-    },
-    {
-      id:    'fastest',
-      label: 'Fastest Route',
-      tag:   '⚡ Fastest',
-      desc:  'Shortest time — passes higher crime-penalty areas.',
-    },
-  ];
-
-  return candidates.map((c, idx) => ({
-    ...TEMPLATES[idx],
-    score:      scores[idx],
-    scoreColor: routeColor(scores[idx]),
-    tagBg:      routeTagBg(scores[idx]),
-    tagColor:   routeColor(scores[idx]),
+  return cands.map((c, i) => ({
+    ...TMPL[i],
+    score:      scores[i],
+    scoreColor: routeColor(scores[i]),
+    tagBg:      routeTagBg(scores[i]),
+    tagColor:   routeColor(scores[i]),
     duration:   fmtTime(c.raw.duration),
     distance:   fmtDist(c.raw.distance),
     polyline:   c.poly,
     steps:      c.raw.legs[0]?.steps ?? [],
-    // expose for debugging / thesis demo
-    avgPenalty: c.result.avgPenalty,
-    maxPenalty: c.result.maxPenalty,
   }));
+}
+
+// ── Main export ───────────────────────────────────────────────────────────────
+export async function computeRoutes(originCoords, destCoords, heatmapPoints = []) {
+  console.log('[RouteEngine] origin:', originCoords, 'dest:', destCoords,
+    'heatmap:', heatmapPoints.length, 'points');
+
+  if (!isValidCoord(originCoords)) throw new Error(`Bad originCoords: ${JSON.stringify(originCoords)}`);
+  if (!isValidCoord(destCoords))   throw new Error(`Bad destCoords: ${JSON.stringify(destCoords)}`);
+
+  // Try thesis ML server first (proper A* with crime-weighted graph)
+  try {
+    console.log('[RouteEngine] trying ML server...');
+    const routes = await fetchFromServer(originCoords, destCoords);
+    console.log('[RouteEngine] ML server returned', routes.length, 'routes');
+
+    // Enrich server response with emoji tags and proper color coding
+    const TMPL = [
+      {id:'safest',   label:'Safest Route',   tag:'✅ Recommended', desc:'Avoids high crime-penalty roads.'},
+      {id:'balanced', label:'Balanced Route', tag:'⚖️ Balanced',    desc:'Moderate crime avoidance.'},
+      {id:'fastest',  label:'Fastest Route',  tag:'⚡ Fastest',      desc:'Shortest time, higher crime risk.'},
+    ];
+
+    return routes.map((r, i) => ({
+      ...r,
+      ...(TMPL[i] ?? {}),
+      scoreColor: routeColor(r.score),
+      tagBg:      routeTagBg(r.score),
+      tagColor:   routeColor(r.score),
+      steps:      r.steps ?? [],
+    }));
+
+  } catch (e) {
+    console.warn('[RouteEngine] ML server failed, falling back to OSRM:', e.message);
+    return fetchFallbackRoutes(originCoords, destCoords, heatmapPoints);
+  }
 }
