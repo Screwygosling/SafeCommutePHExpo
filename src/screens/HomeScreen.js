@@ -153,11 +153,11 @@ export default function HomeScreen({navigation}) {
 
   // ── navigate ──────────────────────────────────────────────────────────────
   const canGo = destCoords !== null;
+  const [travelMode, setTravelMode] = useState('driving'); // 'driving' | 'walking'
 
   const findRoute = () => {
     if (!canGo) return;
 
-    // Fall back to Pasay centre if GPS failed and user didn't type an origin
     const finalOrigin = originCoords ?? [PASAY_CENTER.lat, PASAY_CENTER.lng];
 
     navigation.navigate('RouteOptions', {
@@ -165,7 +165,8 @@ export default function HomeScreen({navigation}) {
       destination:   destText,
       originCoords:  finalOrigin,
       destCoords,
-      heatmapPoints, // pass API crime data for route scoring
+      heatmapPoints,
+      travelMode,    // ← pass the selected mode through
     });
   };
 
@@ -240,6 +241,27 @@ export default function HomeScreen({navigation}) {
           <Text style={s.hint}>👆 Tap a result to confirm your destination</Text>
         )}
 
+        <View style={s.modeToggle}>
+          <TouchableOpacity
+            style={[s.modeBtn, travelMode === 'driving' && s.modeBtnActive]}
+            onPress={() => setTravelMode('driving')}
+            activeOpacity={0.8}
+          >
+            <Text style={[s.modeBtnText, travelMode === 'driving' && s.modeBtnTextActive]}>
+              🚗 Driving
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[s.modeBtn, travelMode === 'walking' && s.modeBtnActive]}
+            onPress={() => setTravelMode('walking')}
+            activeOpacity={0.8}
+          >
+            <Text style={[s.modeBtnText, travelMode === 'walking' && s.modeBtnTextActive]}>
+              🚶 Walking
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         <TouchableOpacity
           style={[s.btn, !canGo && s.btnDisabled]}
           onPress={findRoute}
@@ -265,6 +287,7 @@ export default function HomeScreen({navigation}) {
           style={s.map}
           javaScriptEnabled
           domStorageEnabled
+          androidLayerType="software"
           onLoad={() => setMapReady(true)}
           onMessage={() => setMapReady(true)}
           scalesPageToFit={false}
@@ -299,4 +322,9 @@ const s = StyleSheet.create({
   loader:      {position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', backgroundColor: '#F7F8FA', zIndex: 10},
   loaderText:  {marginTop: 12, fontSize: 14, color: '#888'},
   map:         {flex: 1, backgroundColor: 'transparent'},
+  modeToggle:      {flexDirection: 'row', marginHorizontal: 8, marginTop: 4, backgroundColor: '#F0F0F0', borderRadius: 10, padding: 3},
+  modeBtn:         {flex: 1, paddingVertical: 10, borderRadius: 8, alignItems: 'center'},
+  modeBtnActive:   {backgroundColor: ACCENT},
+  modeBtnText:     {fontSize: 14, fontWeight: '600', color: '#888'},
+  modeBtnTextActive: {color: '#FFF'},
 });

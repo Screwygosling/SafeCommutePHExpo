@@ -108,6 +108,7 @@ export default function HotspotsScreen() {
           javaScriptEnabled
           domStorageEnabled
           mixedContentMode="always"
+          androidLayerType="software"
           onLoad={() => setMapReady(true)}
           onMessage={() => setMapReady(true)}
           onError={(e) => console.error('[Hotspots] WebView error:', e.nativeEvent)}

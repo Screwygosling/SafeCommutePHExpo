@@ -2,6 +2,11 @@
 export const MANILA_CENTER = {lat: 14.58, lng: 120.99};
 export const PASAY_CENTER  = {lat: 14.5378, lng: 121.0014};
 
+export const PASAY_BOUNDS = {
+  southWest: [14.5200, 120.9750],
+  northEast: [14.5650, 121.0200],
+};
+
 export const HOTSPOT_DATA = [
   [14.5995, 120.9842, 1.0], [14.5547, 121.0244, 0.9],
   [14.5764, 121.0107, 0.8], [14.6091, 120.9822, 0.7],
@@ -72,11 +77,20 @@ export function buildLeafletHTML({
   var endpoints           = ${endpointsJSON};
 
   // ── Map ───────────────────────────────────────────────────────────────────
-  var map = L.map('map', {zoomControl: false, attributionControl: false})
-    .setView([${center.lat}, ${center.lng}], ${zoom});
+var pasayBounds = L.latLngBounds(
+  [14.5200, 120.9750],  // southwest
+  [14.5650, 121.0200]   // northeast
+);
 
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19}).addTo(map);
+var map = L.map('map', {
+  zoomControl: false,
+  attributionControl: false,
+  maxBounds: pasayBounds,
+  maxBoundsViscosity: 1.0,
+  minZoom: 14,
+}).setView([${center.lat}, ${center.lng}], ${zoom});
 
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19}).addTo(map);
   // ── Heatmap with KDE-inspired Gaussian smoothing ──────────────────────────
   // Implements: f(x) = (1/nh) * Σ K((x-xi)/h), K = Gaussian kernel
   // Each barangay is a data point xi; crime_penalty is its weight.

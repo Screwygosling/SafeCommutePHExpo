@@ -2,8 +2,12 @@
 // Calls the thesis ML server for crime-weighted A* routing
 // Falls back to OSRM-based scoring if server is unavailable
 
-const API_BASE = 'https://thesisml.onrender.com';
-const OSRM     = 'https://router.project-osrm.org/route/v1/driving';
+const API_BASE  = 'https://thesisml.onrender.com';
+const OSRM_BASE = 'https://router.project-osrm.org/route/v1';
+
+function osrmUrlFor(mode) {
+  return mode === 'walking' ? `${OSRM_BASE}/foot` : `${OSRM_BASE}/driving`;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function isValidCoord(c) {
@@ -23,7 +27,7 @@ function routeColor(score) { return score >= 80 ? '#2D6A4F' : score >= 60 ? '#EF
 function routeTagBg(score) { return score >= 80 ? '#EBF5F0' : score >= 60 ? '#FFF4E6' : '#FDEAEA'; }
 
 // ── Primary: call /safe-route on thesis ML server ─────────────────────────────
-async function fetchFromServer(originCoords, destCoords) {
+async function fetchFromServer(originCoords, destCoords, mode = 'driving') {
   const res  = await fetch(`${API_BASE}/safe-route`, {
     method:  'POST',
     headers: {'Content-Type': 'application/json'},
@@ -32,6 +36,7 @@ async function fetchFromServer(originCoords, destCoords) {
       origin_lng: originCoords[1],
       dest_lat:   destCoords[0],
       dest_lng:   destCoords[1],
+      mode,
     }),
   });
 
@@ -96,9 +101,9 @@ function nudge([lat, lng], dir, m = 150) {
   return [lat+dLat, lng+dLng];
 }
 
-async function fetchOSRM(waypoints) {
+async function fetchOSRM(waypoints, mode = 'driving') {
   const coords = waypoints.map(([lat,lng]) => `${lng},${lat}`).join(';');
-  const res    = await fetch(`${OSRM}/${coords}?overview=full&geometries=polyline&steps=true`);
+  const res    = await fetch(`${osrmUrlFor(mode)}/${coords}?overview=full&geometries=polyline&steps=true`);
   const json   = await res.json();
   if (json.code !== 'Ok' || !json.routes?.length) throw new Error('OSRM no route');
   return json.routes[0];
@@ -125,15 +130,15 @@ function costsToScores(costs) {
   return costs.map(c => Math.round(90 - ((c - min) / rng) * 35));
 }
 
-async function fetchFallbackRoutes(originCoords, destCoords, heatmapPoints) {
+async function fetchFallbackRoutes(originCoords, destCoords, heatmapPoints, mode = 'driving') {
   const goE   = destCoords[1] > originCoords[1];
   const goN   = destCoords[0] > originCoords[0];
   const perp  = goE ? (goN ? 'NW' : 'SW') : (goN ? 'NE' : 'SE');
 
   const [r1, r2, r3] = await Promise.all([
-    fetchOSRM([originCoords, destCoords]),
-    fetchOSRM([nudge(originCoords, perp, 150), destCoords]).catch(() => fetchOSRM([originCoords, destCoords])),
-    fetchOSRM([nudge(originCoords, 'W', 200), destCoords]).catch(() => fetchOSRM([originCoords, destCoords])),
+    fetchOSRM([originCoords, destCoords], mode),
+    fetchOSRM([nudge(originCoords, perp, 150), destCoords], mode).catch(() => fetchOSRM([originCoords, destCoords], mode)),
+    fetchOSRM([nudge(originCoords, 'W', 200), destCoords], mode).catch(() => fetchOSRM([originCoords, destCoords], mode)),
   ]);
 
   const p1 = snapToOrigin(decodePoly(r1.geometry), originCoords);
@@ -166,9 +171,9 @@ async function fetchFallbackRoutes(originCoords, destCoords, heatmapPoints) {
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
-export async function computeRoutes(originCoords, destCoords, heatmapPoints = []) {
+export async function computeRoutes(originCoords, destCoords, heatmapPoints = [], mode = 'driving') {
   console.log('[RouteEngine] origin:', originCoords, 'dest:', destCoords,
-    'heatmap:', heatmapPoints.length, 'points');
+    'heatmap:', heatmapPoints.length, 'points', 'mode:', mode);
 
   if (!isValidCoord(originCoords)) throw new Error(`Bad originCoords: ${JSON.stringify(originCoords)}`);
   if (!isValidCoord(destCoords))   throw new Error(`Bad destCoords: ${JSON.stringify(destCoords)}`);
@@ -176,10 +181,9 @@ export async function computeRoutes(originCoords, destCoords, heatmapPoints = []
   // Try thesis ML server first (proper A* with crime-weighted graph)
   try {
     console.log('[RouteEngine] trying ML server...');
-    const routes = await fetchFromServer(originCoords, destCoords);
+    const routes = await fetchFromServer(originCoords, destCoords, mode);
     console.log('[RouteEngine] ML server returned', routes.length, 'routes');
 
-    // Enrich server response with emoji tags and proper color coding
     const TMPL = [
       {id:'safest',   label:'Safest Route',   tag:'✅ Recommended', desc:'Avoids high crime-penalty roads.'},
       {id:'balanced', label:'Balanced Route', tag:'⚖️ Balanced',    desc:'Moderate crime avoidance.'},
@@ -197,6 +201,6 @@ export async function computeRoutes(originCoords, destCoords, heatmapPoints = []
 
   } catch (e) {
     console.warn('[RouteEngine] ML server failed, falling back to OSRM:', e.message);
-    return fetchFallbackRoutes(originCoords, destCoords, heatmapPoints);
+    return fetchFallbackRoutes(originCoords, destCoords, heatmapPoints, mode);
   }
 }

@@ -137,6 +137,7 @@ export default function NavigationScreen({navigation, route}) {
           style={s.map}
           javaScriptEnabled
           domStorageEnabled
+          androidLayerType="software"
           onLoad={() => setMapReady(true)}
           onMessage={handleMessage}
           scalesPageToFit={false}

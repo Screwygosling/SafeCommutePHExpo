@@ -21,12 +21,20 @@ export default function MainTabs() {
       <Tab.Screen
         name="Map"
         component={HomeScreen}
-        options={{tabBarIcon: ({color}) => <Text style={{fontSize: 22}}>🗺️</Text>, tabBarLabel: 'Map'}}
+        options={{
+          tabBarIcon: ({color}) => <Text style={{fontSize: 22}}>🗺️</Text>,
+          tabBarLabel: 'Map',
+          unmountOnBlur: true,
+        }}
       />
       <Tab.Screen
         name="Hotspots"
         component={HotspotsScreen}
-        options={{tabBarIcon: () => <Text style={{fontSize: 22}}>⚠️</Text>, tabBarLabel: 'Hotspots'}}
+        options={{
+          tabBarIcon: () => <Text style={{fontSize: 22}}>⚠️</Text>,
+          tabBarLabel: 'Hotspots',
+          unmountOnBlur: true,
+        }}
       />
       <Tab.Screen
         name="Settings"

@@ -18,6 +18,7 @@ export default function RouteOptionsScreen({navigation, route}) {
     originCoords  = null,
     destCoords    = null,
     heatmapPoints = [],   // passed from HomeScreen after /heatmap fetch
+    travelMode = 'driving'
   } = route?.params || {};
 
   const safeOrigin = isValidCoord(originCoords) ? originCoords : DEFAULT_ORIGIN;
@@ -35,7 +36,7 @@ export default function RouteOptionsScreen({navigation, route}) {
     setLoading(true);
     setError(null);
     try {
-      const data = await computeRoutes(safeOrigin, safeDest, heatmapPoints);
+      const data = await computeRoutes(safeOrigin, safeDest, heatmapPoints, travelMode);
       setRoutes(data);
       setSelected(data[0]?.id ?? 'safest');
     } catch (e) {
