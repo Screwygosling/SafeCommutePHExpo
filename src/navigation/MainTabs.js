@@ -1,10 +1,19 @@
 import React from 'react';
 import {createBottomTabNavigator} from '@react-navigation/bottom-tabs';
-import {Text, StyleSheet} from 'react-native';
+import {View, Text, StyleSheet} from 'react-native';
 
 import HomeScreen from '../screens/HomeScreen';
 import HotspotsScreen from '../screens/HotspotsScreen';
 import SettingsScreen from '../screens/SettingsScreen';
+
+
+function TestScreen() {
+  return (
+    <View style={{flex: 1, backgroundColor: 'red', alignItems: 'center', justifyContent: 'center'}}>
+      <Text style={{fontSize: 24, color: '#FFF'}}>TEST MAP SCREEN</Text>
+    </View>
+  );
+}
 
 const Tab = createBottomTabNavigator();
 
@@ -21,12 +30,18 @@ export default function MainTabs() {
       <Tab.Screen
         name="Map"
         component={HomeScreen}
-        options={{tabBarIcon: ({color}) => <Text style={{fontSize: 22}}>🗺️</Text>, tabBarLabel: 'Map'}}
+        options={{
+        tabBarIcon: ({color}) => <Text style={{fontSize: 22}}>🗺️</Text>,
+        tabBarLabel: 'Map'}}
       />
       <Tab.Screen
         name="Hotspots"
         component={HotspotsScreen}
-        options={{tabBarIcon: () => <Text style={{fontSize: 22}}>⚠️</Text>, tabBarLabel: 'Hotspots'}}
+        options={{
+          tabBarIcon: () => <Text style={{fontSize: 22}}>⚠️</Text>,
+          tabBarLabel: 'Hotspots',
+          unmountOnBlur: true,
+        }}
       />
       <Tab.Screen
         name="Settings"
