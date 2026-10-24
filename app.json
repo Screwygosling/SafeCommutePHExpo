@@ -36,8 +36,12 @@
     },
     "extra": {
       "allowedHosts": [
+        "thesisml.onrender.com",
         "thesisml.onrender.com"
-      ]
+      ],
+      "eas": {
+        "projectId": "7a681725-1310-4ae8-9e43-0e2245e5077d"
+      }
     },
     "plugins": [
       [

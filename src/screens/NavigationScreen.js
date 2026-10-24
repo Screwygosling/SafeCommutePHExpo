@@ -2,6 +2,7 @@ import React, {useState, useEffect, useRef} from 'react';
 import {View, Text, TouchableOpacity, StyleSheet, SafeAreaView, Animated, Alert, Share, ActivityIndicator} from 'react-native';
 import {WebView} from 'react-native-webview';
 import {buildLeafletHTML} from '../utils/LeafletMap';
+import * as Location from 'expo-location';
 
 const ACCENT = '#2D6A4F';
 const DANGER = '#D62828';
@@ -33,6 +34,7 @@ export default function NavigationScreen({navigation, route}) {
   const [showAlert, setShowAlert] = useState(false);
   const [mapReady, setMapReady]   = useState(false);
   const alertAnim = useRef(new Animated.Value(0)).current;
+  const webviewRef = useRef(null);
 
   // Build steps from the pre-computed OSRM raw steps if available
   useEffect(() => {
@@ -95,6 +97,35 @@ export default function NavigationScreen({navigation, route}) {
   const progress   = ((step + 1) / steps.length) * 100;
   const cur        = steps[step] ?? steps[0];
 
+  useEffect(() => {
+     let subscription;
+
+     (async () => {
+       const {status} = await Location.requestForegroundPermissionsAsync();
+       if (status !== 'granted') return;
+
+       subscription = await Location.watchPositionAsync(
+         {
+           accuracy: Location.Accuracy.BestForNavigation,
+           timeInterval: 2000,
+           distanceInterval: 5,
+         },
+         (location) => {
+           const {latitude, longitude} = location.coords;
+           if (webviewRef.current) {
+             webviewRef.current.injectJavaScript(
+               `updateUserLocation(${latitude}, ${longitude}); true;`
+             );
+           }
+         }
+       );
+     })();
+
+     return () => {
+       if (subscription) subscription.remove();
+     };
+   }, []);
+
   return (
     <SafeAreaView style={s.container}>
       <View style={s.header}>
@@ -132,6 +163,7 @@ export default function NavigationScreen({navigation, route}) {
           </View>
         )}
         <WebView
+          ref={webviewRef}
           originWhitelist={['*']}
           source={{html: mapHTML}}
           style={s.map}

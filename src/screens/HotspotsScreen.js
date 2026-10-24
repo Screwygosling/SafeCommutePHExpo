@@ -1,8 +1,9 @@
-import React, {useState, useEffect, useCallback, useMemo} from 'react';
+import React, {useState, useRef, useEffect, useCallback, useMemo} from 'react';
 import {View, Text, StyleSheet, TouchableOpacity, SafeAreaView, ActivityIndicator} from 'react-native';
 import {WebView} from 'react-native-webview';
 import {buildLeafletHTML, PASAY_CENTER} from '../utils/LeafletMap';
 import {getCrimeIncidents} from '../utils/api';
+import * as Location from 'expo-location';
 
 const LEGEND = [
   {label: 'Low',       color: '#52B788'},
@@ -11,12 +12,26 @@ const LEGEND = [
   {label: 'Very High', color: '#D62828'},
 ];
 
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3; // meters
+  const φ1 = lat1 * Math.PI/180;
+  const φ2 = lat2 * Math.PI/180;
+  const Δφ = (lat2-lat1) * Math.PI/180;
+  const Δλ = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+            Math.cos(φ1) * Math.cos(φ2) *
+            Math.sin(Δλ/2) * Math.sin(Δλ/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
 export default function HotspotsScreen() {
   const [showPolice,    setShowPolice]    = useState(true);
   const [mapReady,      setMapReady]      = useState(false);
   const [heatmapPoints, setHeatmapPoints] = useState([]);
   const [loadingData,   setLoadingData]   = useState(true);
   const [error,         setError]         = useState(null);
+  const webviewRef = useRef(null);
 
   // Define fetch BEFORE useEffect to avoid hoisting issues
   const fetchData = useCallback(async () => {
@@ -39,6 +54,7 @@ export default function HotspotsScreen() {
         lng:           inc.lng,
         crime_penalty: inc.crime_penalty,
         intensity:     inc.crime_penalty / 100,
+        type:          (inc.offense ?? 'UNKNOWN').trim(),
         name:          (inc.offense ?? 'UNKNOWN').trim(),
         threat_level:  inc.crime_penalty >= 75 ? 'very_high'
                      : inc.crime_penalty >= 50 ? 'high'
@@ -54,6 +70,50 @@ export default function HotspotsScreen() {
       setLoadingData(false);
     }
   }, []);
+
+  useEffect(() => {
+    let subscription;
+
+    const startWatching = async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+
+      subscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.Balanced,
+          timeInterval: 5000,
+          distanceInterval: 20,
+        },
+        (location) => {
+          const { latitude, longitude } = location.coords;
+
+          // Check if any hotspot is within 300 meters
+          // This uses the getDistance function defined at the top of your file
+          const isNearby = heatmapPoints.some(point => {
+            const dist = getDistance(latitude, longitude, point.lat, point.lng);
+            return dist < 300;
+          });
+
+          if (webviewRef.current) {
+            webviewRef.current.injectJavaScript(
+              `if(window.updateUserLocation) {
+                window.updateUserLocation(${latitude}, ${longitude}, ${isNearby});
+              } true;`
+            );
+          }
+        }
+      );
+    };
+
+    startWatching();
+
+    // Cleanup: This must be outside the async function
+    return () => {
+      if (subscription) {
+        subscription.remove();
+      }
+    };
+  }, [heatmapPoints]); // Added heatmapPoints so the logic updates when data arrives
 
   useEffect(() => {
     console.log('[Hotspots] useEffect fired — calling fetchData');
@@ -91,7 +151,7 @@ export default function HotspotsScreen() {
         </View>
       )}
 
-      <View style={s.mapWrap}>
+      <View style={s.mapWrap} collapsable={false} removeClippedSubviews={false}>
         {(!mapReady || loadingData) && (
           <View style={s.loader}>
             <ActivityIndicator size="large" color="#2D6A4F" />
@@ -101,6 +161,7 @@ export default function HotspotsScreen() {
           </View>
         )}
         <WebView
+          ref={webviewRef}
           key={heatmapPoints.length}
           originWhitelist={['*']}
           source={{html: mapHTML}}

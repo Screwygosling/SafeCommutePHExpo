@@ -28,7 +28,6 @@ const geocode = async (query) => {
       headers: {'User-Agent': 'SafeCommutePH/1.0'},
     });
     const json = await res.json();
-    // Client-side guard — drop anything outside the bounding box
     return json
       .filter(r => {
         const lat = parseFloat(r.lat);
@@ -40,7 +39,12 @@ const geocode = async (query) => {
         name: r.display_name,
         lat:  parseFloat(r.lat),
         lng:  parseFloat(r.lon),
-      }));
+      }))
+      .sort((a, b) => {
+        const distA = Math.hypot(a.lat - PASAY_CENTER.lat, a.lng - PASAY_CENTER.lng);
+        const distB = Math.hypot(b.lat - PASAY_CENTER.lat, b.lng - PASAY_CENTER.lng);
+        return distA - distB;
+      });
   } catch {
     return [];
   }
@@ -49,29 +53,27 @@ const geocode = async (query) => {
 const mapHTML = buildLeafletHTML({center: PASAY_CENTER, zoom: 13, showHeatmap: true});
 
 export default function HomeScreen({navigation}) {
-  // ── origin state ─────────────────────────────────────────────────────────
   const [originText,   setOriginText]   = useState('');
-  const [originCoords, setOriginCoords] = useState(null);   // [lat, lng] or null
+  const [originCoords, setOriginCoords] = useState(null);
   const [gpsLoading,   setGpsLoading]   = useState(false);
 
-  // ── destination state ─────────────────────────────────────────────────────
   const [destText,    setDestText]    = useState('');
-  const [destCoords,  setDestCoords]  = useState(null);     // [lat, lng] or null
+  const [destCoords,  setDestCoords]  = useState(null);
   const [destResults, setDestResults] = useState([]);
   const [destLoading, setDestLoading] = useState(false);
 
-  // ── origin results (when user types instead of using GPS) ─────────────────
   const [originResults, setOriginResults] = useState([]);
   const [originLoading, setOriginLoading] = useState(false);
 
-  const [activeInput, setActiveInput] = useState(null);     // 'origin' | 'dest' | null
+  const [activeInput, setActiveInput] = useState(null);
   const [mapReady,      setMapReady]      = useState(false);
   const [heatmapPoints, setHeatmapPoints] = useState([]);
+  const [travelMode, setTravelMode] = useState('driving');
 
   const destTimer   = useRef(null);
   const originTimer = useRef(null);
+  const webviewRef  = useRef(null);
 
-  // ── Fetch heatmap data from API on mount ─────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
@@ -87,7 +89,6 @@ export default function HomeScreen({navigation}) {
     })();
   }, []);
 
-  // ── GPS: get current location on mount ───────────────────────────────────
   useEffect(() => {
     (async () => {
       setGpsLoading(true);
@@ -108,10 +109,38 @@ export default function HomeScreen({navigation}) {
     })();
   }, []);
 
-  // ── debounced geocode: destination ────────────────────────────────────────
+  useEffect(() => {
+    let subscription;
+
+    (async () => {
+      const {status} = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') return;
+
+      subscription = await Location.watchPositionAsync(
+        {
+          accuracy: Location.Accuracy.Balanced,
+          timeInterval: 3000,
+          distanceInterval: 10,
+        },
+        (location) => {
+          const {latitude, longitude} = location.coords;
+          if (webviewRef.current) {
+            webviewRef.current.injectJavaScript(
+              `updateUserLocation(${latitude}, ${longitude}); true;`
+            );
+          }
+        }
+      );
+    })();
+
+    return () => {
+      if (subscription) subscription.remove();
+    };
+  }, []);
+
   const onDestChange = useCallback((text) => {
     setDestText(text);
-    setDestCoords(null);          // clear any previously picked coord
+    setDestCoords(null);
     clearTimeout(destTimer.current);
     if (text.trim().length < 3) { setDestResults([]); return; }
     destTimer.current = setTimeout(async () => {
@@ -122,7 +151,6 @@ export default function HomeScreen({navigation}) {
     }, 500);
   }, []);
 
-  // ── debounced geocode: origin (when user types manually) ──────────────────
   const onOriginChange = useCallback((text) => {
     setOriginText(text);
     setOriginCoords(null);
@@ -136,7 +164,6 @@ export default function HomeScreen({navigation}) {
     }, 500);
   }, []);
 
-  // ── pick a suggestion ─────────────────────────────────────────────────────
   const pickOrigin = (item) => {
     setOriginText(item.name);
     setOriginCoords([item.lat, item.lng]);
@@ -151,9 +178,7 @@ export default function HomeScreen({navigation}) {
     setActiveInput(null);
   };
 
-  // ── navigate ──────────────────────────────────────────────────────────────
   const canGo = destCoords !== null;
-  const [travelMode, setTravelMode] = useState('driving'); // 'driving' | 'walking'
 
   const findRoute = () => {
     if (!canGo) return;
@@ -166,11 +191,10 @@ export default function HomeScreen({navigation}) {
       originCoords:  finalOrigin,
       destCoords,
       heatmapPoints,
-      travelMode,    // ← pass the selected mode through
+      travelMode,
     });
   };
 
-  // ── render suggestion rows ────────────────────────────────────────────────
   const renderSuggestion = (item, onPress) => (
     <TouchableOpacity key={item.id} style={s.suggRow} onPress={() => onPress(item)}>
       <Text style={s.suggPin}>📍</Text>
@@ -188,7 +212,6 @@ export default function HomeScreen({navigation}) {
       </View>
 
       <View style={s.card}>
-        {/* ── Origin ── */}
         <View style={s.row}>
           <Text style={s.pin}>{gpsLoading ? '⏳' : '📍'}</Text>
           <TextInput
@@ -211,7 +234,6 @@ export default function HomeScreen({navigation}) {
 
         <View style={s.sep} />
 
-        {/* ── Destination ── */}
         <View style={s.row}>
           <Text style={s.pin}>🎯</Text>
           <TextInput
@@ -233,7 +255,6 @@ export default function HomeScreen({navigation}) {
           </View>
         )}
 
-        {/* hint when user has typed but not picked yet */}
         {activeInput === 'dest' && destText.length >= 3 && !destCoords && !destLoading && destResults.length === 0 && (
           <Text style={s.hint}>No results found — try a different search</Text>
         )}
@@ -274,7 +295,7 @@ export default function HomeScreen({navigation}) {
 
       <Text style={s.mapLabel}>MAP / CRIME HOTSPOTS  •  OpenStreetMap (Free)</Text>
 
-      <View style={s.mapWrap}>
+      <View style={s.mapWrap} collapsable={false} removeClippedSubviews={false}>
         {!mapReady && (
           <View style={s.loader}>
             <ActivityIndicator size="large" color={ACCENT} />
@@ -282,6 +303,7 @@ export default function HomeScreen({navigation}) {
           </View>
         )}
         <WebView
+          ref={webviewRef}
           originWhitelist={['*']}
           source={{html: mapHTML}}
           style={s.map}
